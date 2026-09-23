@@ -9,6 +9,7 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -21,6 +22,7 @@ import org.springframework.boot.ApplicationArguments;
 import org.springframework.boot.ApplicationRunner;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.util.StringUtils;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.fasterxml.jackson.core.type.TypeReference;
@@ -32,11 +34,17 @@ import com.hanyou.brain.common.ErrorCode;
 import com.hanyou.brain.common.RelationType;
 import com.hanyou.brain.config.HanYouProperties;
 import com.hanyou.brain.entity.CityProfile;
+import com.hanyou.brain.entity.Experience;
 import com.hanyou.brain.entity.Poi;
 import com.hanyou.brain.entity.PoiRelation;
+import com.hanyou.brain.entity.Product;
+import com.hanyou.brain.entity.ProductCategory;
 import com.hanyou.brain.mapper.CityProfileMapper;
+import com.hanyou.brain.mapper.ExperienceMapper;
 import com.hanyou.brain.mapper.PoiMapper;
 import com.hanyou.brain.mapper.PoiRelationMapper;
+import com.hanyou.brain.mapper.ProductCategoryMapper;
+import com.hanyou.brain.mapper.ProductMapper;
 
 import lombok.AllArgsConstructor;
 import lombok.Data;
@@ -50,6 +58,10 @@ import lombok.RequiredArgsConstructor;
  *
  * <p>关系网络是算出来的，不是手填的：按球面距离和业态规则生成 NEARBY /
  * SUPPORT / SAME_VILLAGE / DIVERSION 四类边。换一份数据，网络自动重建。
+ *
+ * <p>导入前会做引用自检（{@link #validateReferences}）：体验挂的乡村、产品挂的
+ * 体验与分类，都必须在同一份数据包里真实存在。宁可启动失败并指出是哪一条错了，
+ * 也不要让库里出现一批指向空气的产品——那种问题要到演示时才被发现。
  */
 @Component
 @RequiredArgsConstructor
@@ -99,6 +111,9 @@ public class CityPackImporter implements ApplicationRunner {
     private final CityProfileMapper cityProfileMapper;
     private final PoiMapper poiMapper;
     private final PoiRelationMapper poiRelationMapper;
+    private final ProductCategoryMapper productCategoryMapper;
+    private final ExperienceMapper experienceMapper;
+    private final ProductMapper productMapper;
 
     /**
      * 启动时导入。
@@ -117,25 +132,46 @@ public class CityPackImporter implements ApplicationRunner {
         Path dir = resolveCitypackDir();
         String cityCode = props.getCity();
 
+        // ---- 读取。顺序有依赖：产品要按分类名去查分类编码，所以分类必须先读 ----
         CityProfile profile = readMeta(dir, cityCode);
         List<Poi> pois = readPois(dir, cityCode);
         if (pois.isEmpty()) {
             throw new BizException(ErrorCode.CITYPACK_INVALID, "数据包里没有任何资源点：" + dir.resolve("pois.json"));
         }
+        List<ProductCategory> categories = readCategories(dir, cityCode);
+        List<Experience> experiences = readExperiences(dir, cityCode);
 
-        // 数据包是权威来源：每次启动全量重建，避免上一次导入的残留混进来
+        // 先把数据包自身的问题挑出来，再动数据库。
+        // 问题收集在一个列表里而不是抛一个报一个：数据包是手工维护的，
+        // 一次只报一条会让人来回改好几轮。
+        List<String> problems = new ArrayList<>();
+        Map<String, String> nameToCode = nameToCode(categories, problems);
+        List<Product> products = readProducts(dir, cityCode, nameToCode, problems);
+        validateReferences(pois, categories, experiences, products, problems);
+        failIfAny(problems, dir);
+
+        // 数据包是权威来源：每次启动全量重建，避免上一次导入的残留混进来。
+        // 删除顺序与依赖相反——先删下游的产品，再删它依赖的体验与分类。
+        productMapper.delete(new LambdaQueryWrapper<Product>().eq(Product::getCityCode, cityCode));
+        experienceMapper.delete(new LambdaQueryWrapper<Experience>().eq(Experience::getCityCode, cityCode));
+        productCategoryMapper.delete(new LambdaQueryWrapper<ProductCategory>().eq(ProductCategory::getCityCode, cityCode));
         poiRelationMapper.delete(new LambdaQueryWrapper<PoiRelation>().eq(PoiRelation::getCityCode, cityCode));
         poiMapper.delete(new LambdaQueryWrapper<Poi>().eq(Poi::getCityCode, cityCode));
         cityProfileMapper.deleteById(cityCode);
 
+        // 插入顺序与依赖一致：资源点 -> 分类 -> 体验 -> 产品 -> 关系
         cityProfileMapper.insert(profile);
         pois.forEach(poiMapper::insert);
+        categories.forEach(productCategoryMapper::insert);
+        experiences.forEach(experienceMapper::insert);
+        products.forEach(productMapper::insert);
 
         List<PoiRelation> relations = buildRelations(cityCode, pois);
         relations.forEach(poiRelationMapper::insert);
 
-        log.info("[CityPack] 导入完成 city={} 资源点={} 关系={} 数据目录={}",
-                cityCode, pois.size(), relations.size(), dir);
+        log.info("[CityPack] 导入完成 city={} 资源点={} 关系={} 分类={} 体验={} 产品={} 数据目录={}",
+                cityCode, pois.size(), relations.size(), categories.size(),
+                experiences.size(), products.size(), dir);
     }
 
     /**
@@ -222,6 +258,171 @@ public class CityPackImporter implements ApplicationRunner {
             out.add(p);
         }
         return out;
+    }
+
+    private List<ProductCategory> readCategories(Path dir, String cityCode) {
+        List<CategoryJson> raw = readJson(dir.resolve("categories.json"), new TypeReference<List<CategoryJson>>() {
+        });
+        List<ProductCategory> out = new ArrayList<>(raw.size());
+        for (CategoryJson j : raw) {
+            ProductCategory c = new ProductCategory();
+            c.setCode(j.getCode());
+            c.setCityCode(cityCode);
+            c.setName(j.getName());
+            c.setParentCode(j.getParentCode());
+            // 排序值缺失时给 0 而不是 null：null 参与 order by 时位置随数据库实现而变，
+            // 首页筛选条的顺序会飘
+            c.setSort(j.getSort() == null ? 0 : j.getSort());
+            out.add(c);
+        }
+        return out;
+    }
+
+    private List<Experience> readExperiences(Path dir, String cityCode) {
+        List<ExperienceJson> raw = readJson(dir.resolve("experiences.json"),
+                new TypeReference<List<ExperienceJson>>() {
+                });
+        List<Experience> out = new ArrayList<>(raw.size());
+        for (ExperienceJson j : raw) {
+            Experience e = new Experience();
+            e.setId(j.getId());
+            e.setCityCode(cityCode);
+            e.setPoiId(j.getPoiId());
+            e.setName(j.getName());
+            e.setType(j.getType());
+            e.setDurationMin(j.getDurationMin());
+            e.setPrice(toDecimal(j.getPrice()));
+            e.setSeason(j.getSeason());
+            e.setCapacity(j.getCapacity());
+            // 数组入库为逗号分隔字符串；对外再由 ExperienceVO 转回数组
+            e.setTags(j.getTags() == null ? null : String.join(",", j.getTags()));
+            // 数据包里叫 desc，库里叫 description（DESC 是 SQL 保留字），对外仍叫 desc
+            e.setDescription(j.getDesc());
+            e.setDataOrigin(j.getDataOrigin());
+            e.setSourceUrl(j.getSourceUrl());
+            e.setStatus(1);
+            out.add(e);
+        }
+        return out;
+    }
+
+    /**
+     * 读取产品，并把分类中文名解析成分类编码。
+     *
+     * <p>数据包里产品写的是分类名（"茶叶"）而不是编码（"CAT-TEA"）——数据包是给人
+     * 维护的，写中文比记编码更不容易错。但库里必须存编码：否则改一次分类名，
+     * 所有产品的分类引用就全断了。解析放在导入这一步，把"人可读"和"机器稳定"
+     * 两件事分开，代价是分类名成了隐式外键，所以解析不出来时记一条问题，
+     * 不允许静默落一条没有分类的产品。
+     */
+    private List<Product> readProducts(Path dir, String cityCode, Map<String, String> nameToCode,
+            List<String> problems) {
+        List<ProductJson> raw = readJson(dir.resolve("products.json"), new TypeReference<List<ProductJson>>() {
+        });
+        List<Product> out = new ArrayList<>(raw.size());
+
+        for (ProductJson j : raw) {
+            Product p = new Product();
+            p.setId(j.getId());
+            p.setCityCode(cityCode);
+            p.setPoiId(j.getPoiId());
+            p.setExperienceId(j.getExperienceId());
+            p.setName(j.getName());
+            p.setSpec(j.getSpec());
+            p.setPrice(toDecimal(j.getPrice()));
+            p.setOriginVillage(j.getOriginVillage());
+            p.setStock(j.getStock());
+            p.setTags(j.getTags() == null ? null : String.join(",", j.getTags()));
+            p.setStory(j.getStory());
+            p.setScene(j.getScene());
+            p.setDataOrigin(j.getDataOrigin());
+            p.setSourceUrl(j.getSourceUrl());
+            p.setStatus(1);
+
+            String code = nameToCode.get(j.getCategory());
+            if (code == null) {
+                problems.add("产品 " + j.getId() + " 的分类「" + j.getCategory() + "」在 categories.json 里没有");
+            }
+            p.setCategoryCode(code);
+            out.add(p);
+        }
+        return out;
+    }
+
+    /**
+     * 分类名 -> 分类编码。
+     *
+     * <p>重名会让产品指到不确定的分类上，判为数据包错误。这里仍然返回一份 map
+     * （重名时先出现的那个胜出）而不是直接抛：让引用校验能继续跑完，
+     * 把同一份数据包里的问题一次报全。
+     */
+    private Map<String, String> nameToCode(List<ProductCategory> categories, List<String> problems) {
+        Map<String, String> map = new LinkedHashMap<>();
+        for (ProductCategory c : categories) {
+            if (!StringUtils.hasText(c.getName())) {
+                problems.add("分类 " + c.getCode() + " 没有 name，产品无法按名字引用它");
+                continue;
+            }
+            String previous = map.putIfAbsent(c.getName(), c.getCode());
+            if (previous != null) {
+                problems.add("categories.json 里有重名分类「" + c.getName() + "」（"
+                        + previous + " 与 " + c.getCode() + "），产品无法确定该挂到哪个编码上");
+            }
+        }
+        return map;
+    }
+
+    /**
+     * 引用自检。
+     *
+     * <p>数据库没有建外键（跨模块的表还会继续加，外键会让换城市时的全量重建变脆），
+     * 所以引用完整性由导入器负责。检查项与 db/V2__m2_experience_product.sql 里
+     * chk_product_traceable 约束一致：产品必须挂产地或体验，至少一项。
+     *
+     * <p>分类名到编码的解析问题由 readProducts / nameToCode 记录，不在这里重复报。
+     * 只收集、不抛，由调用方统一决定什么时候失败。
+     */
+    private void validateReferences(List<Poi> pois, List<ProductCategory> categories,
+            List<Experience> experiences, List<Product> products, List<String> problems) {
+        Set<String> poiIds = pois.stream().map(Poi::getId).collect(Collectors.toSet());
+        Set<String> experienceIds = experiences.stream().map(Experience::getId).collect(Collectors.toSet());
+        Set<String> categoryCodes = categories.stream().map(ProductCategory::getCode).collect(Collectors.toSet());
+
+        for (Experience e : experiences) {
+            if (!StringUtils.hasText(e.getPoiId()) || !poiIds.contains(e.getPoiId())) {
+                problems.add("体验 " + e.getId() + " 的 poi_id=" + e.getPoiId() + " 在 pois.json 里不存在");
+            }
+        }
+
+        for (Product p : products) {
+            boolean hasPoi = StringUtils.hasText(p.getPoiId());
+            boolean hasExperience = StringUtils.hasText(p.getExperienceId());
+
+            if (!hasPoi && !hasExperience) {
+                problems.add("产品 " + p.getId() + " 既没有 poi_id 也没有 experience_id（产品必须可追溯）");
+            }
+            if (hasPoi && !poiIds.contains(p.getPoiId())) {
+                problems.add("产品 " + p.getId() + " 的 poi_id=" + p.getPoiId() + " 在 pois.json 里不存在");
+            }
+            if (hasExperience && !experienceIds.contains(p.getExperienceId())) {
+                problems.add("产品 " + p.getId() + " 的 experience_id=" + p.getExperienceId()
+                        + " 在 experiences.json 里不存在");
+            }
+            // categoryCode 为 null 的情况已由 readProducts 报过，这里不重复
+            if (p.getCategoryCode() != null && !categoryCodes.contains(p.getCategoryCode())) {
+                problems.add("产品 " + p.getId() + " 的分类编码 " + p.getCategoryCode() + " 在 categories.json 里不存在");
+            }
+        }
+    }
+
+    /** 有问题就一次性全抛出来，附带数据包路径，让人知道该去改哪个目录 */
+    private void failIfAny(List<String> problems, Path dir) {
+        if (problems.isEmpty()) {
+            return;
+        }
+        throw new BizException(ErrorCode.CITYPACK_INVALID,
+                "数据包校验未通过（" + dir + "），共 " + problems.size() + " 处：\n  - "
+                        + String.join("\n  - ", problems));
     }
 
     private <T> T readJson(Path file, TypeReference<T> type) {
@@ -373,6 +574,54 @@ public class CityPackImporter implements ApplicationRunner {
         private Integer capacity;
         private List<String> tags;
         private String summary;
+        private String scene;
+        private String dataOrigin;
+        private String sourceUrl;
+    }
+
+    @Data
+    private static class CategoryJson {
+        private String code;
+        private String name;
+        private String parentCode;
+        private Integer sort;
+    }
+
+    @Data
+    private static class ExperienceJson {
+        private String id;
+        private String poiId;
+        private String name;
+        private String type;
+        private Integer durationMin;
+        private Double price;
+        private String season;
+        private Integer capacity;
+        private List<String> tags;
+
+        /** 数据包里叫 desc，落库到 Experience.description（DESC 是 SQL 保留字） */
+        private String desc;
+
+        private String dataOrigin;
+        private String sourceUrl;
+    }
+
+    @Data
+    private static class ProductJson {
+        private String id;
+        private String poiId;
+        private String experienceId;
+
+        /** 分类中文名，由 readProducts 解析成 categoryCode */
+        private String category;
+
+        private String name;
+        private String spec;
+        private Double price;
+        private String originVillage;
+        private Integer stock;
+        private List<String> tags;
+        private String story;
         private String scene;
         private String dataOrigin;
         private String sourceUrl;

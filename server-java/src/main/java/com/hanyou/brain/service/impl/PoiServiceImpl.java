@@ -1,8 +1,6 @@
 package com.hanyou.brain.service.impl;
 
-import java.math.BigDecimal;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
@@ -17,6 +15,7 @@ import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.hanyou.brain.common.BizException;
 import com.hanyou.brain.common.ErrorCode;
 import com.hanyou.brain.common.RelationType;
+import com.hanyou.brain.common.VoUtils;
 import com.hanyou.brain.config.HanYouProperties;
 import com.hanyou.brain.entity.CityProfile;
 import com.hanyou.brain.entity.Poi;
@@ -112,8 +111,8 @@ public class PoiServiceImpl implements PoiService {
         v.setProvince(p.getProvince());
 
         CityMetaVO.Center center = new CityMetaVO.Center();
-        center.setLng(toDouble(p.getCenterLng()));
-        center.setLat(toDouble(p.getCenterLat()));
+        center.setLng(VoUtils.toDouble(p.getCenterLng()));
+        center.setLat(VoUtils.toDouble(p.getCenterLat()));
         v.setCenter(center);
 
         v.setTagline(p.getTagline());
@@ -135,13 +134,13 @@ public class PoiServiceImpl implements PoiService {
         v.setBusinessType(p.getBusinessType());
         v.setDistrict(p.getDistrict());
         v.setLevel(p.getLevel());
-        v.setLng(toDouble(p.getLng()));
-        v.setLat(toDouble(p.getLat()));
-        v.setTicketPrice(toDouble(p.getTicketPrice()));
+        v.setLng(VoUtils.toDouble(p.getLng()));
+        v.setLat(VoUtils.toDouble(p.getLat()));
+        v.setTicketPrice(VoUtils.toDouble(p.getTicketPrice()));
         v.setOpenHours(p.getOpenHours());
         v.setDurationMin(p.getDurationMin());
         v.setCapacity(p.getCapacity());
-        v.setTags(splitTags(p.getTags()));
+        v.setTags(VoUtils.splitTags(p.getTags()));
         v.setSummary(p.getSummary());
         v.setScene(p.getScene());
         v.setDataOrigin(p.getDataOrigin());
@@ -156,24 +155,12 @@ public class PoiServiceImpl implements PoiService {
         v.setBusinessType(target.getBusinessType());
         v.setDistrict(target.getDistrict());
         v.setScene(target.getScene());
-        v.setDistanceKm(toDouble(r.getDistanceKm()));
+        v.setDistanceKm(VoUtils.toDouble(r.getDistanceKm()));
         v.setTravelMin(r.getTravelMin());
-        v.setWeight(toDouble(r.getWeight()));
+        v.setWeight(VoUtils.toDouble(r.getWeight()));
         return v;
     }
 
-    /** DECIMAL 列在 VO 里统一用 Double：前端只做展示与排序，不需要 BigDecimal 的精度语义 */
-    private static Double toDouble(BigDecimal v) {
-        return v == null ? null : v.doubleValue();
-    }
-
-    private static List<String> splitTags(String tags) {
-        if (!StringUtils.hasText(tags)) {
-            return List.of();
-        }
-        return Arrays.stream(tags.split(","))
-                .map(String::trim)
-                .filter(s -> !s.isEmpty())
-                .collect(Collectors.toList());
-    }
+    // splitTags / toDouble 已提到 VoUtils：M2 的体验与产品 Service 要用同一套转换规则，
+    // 三个接口对同一种数据库类型的输出口径必须一致，否则前端要写三遍兼容代码。
 }
