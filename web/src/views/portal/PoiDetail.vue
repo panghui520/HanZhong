@@ -13,8 +13,9 @@ const route = useRoute()
 
 /**
  * 详情页数据。
- * 资源本体与四组关系来自后端 /api/pois/{id}——关系是后端按球面距离与业态规则算好的，
- * 前端不再自己算距离。体验与产品在 M2 之前仍读本地 JSON。
+ * 三份数据全部来自后端：资源本体与四组关系走 /api/pois/{id}，体验与产品按 poi_id 过滤后取。
+ * 关系是后端按球面距离与业态规则算好的，体验与产品的所属名称也由后端补全，
+ * 前端不再自己算距离、也不再多取一份全量列表来查名字。
  *
  * 资源不存在（后端错误码 1001）返回 null，走"未找到"空状态而不是错误态：
  * 链接过期、资源下架是正常的产品情况，不该给用户看一行技术性红字。
@@ -24,15 +25,10 @@ async function loadDetail(id: string) {
   try {
     const [detail, experiences, products] = await Promise.all([
       getPoiDetail(id),
-      getExperiences(),
-      getProducts(),
+      getExperiences({ poiId: id }),
+      getProducts({ poiId: id }),
     ])
-    return {
-      detail,
-      experiences: experiences.filter((e) => e.poi_id === id),
-      products: products.filter((p) => p.poi_id === id),
-      allExperiences: experiences,
-    }
+    return { detail, experiences, products }
   } catch (e) {
     if (e instanceof ApiError && e.code === 1001) return null
     throw e
@@ -51,8 +47,6 @@ watch(
 const poi = computed<Poi | undefined>(() => data.value?.detail.poi)
 const experiences = computed<Experience[]>(() => data.value?.experiences ?? [])
 const products = computed<Product[]>(() => data.value?.products ?? [])
-const expName = (id?: string) =>
-  (data.value?.allExperiences ?? []).find((e) => e.id === id)?.name ?? '乡村体验'
 
 /**
  * 距离文案。
@@ -192,7 +186,7 @@ const rating = computed(() => (poi.value ? ratingOf(poi.value.id) : 0))
               <article v-for="g in products" :key="g.id" class="good card card-hover">
                 <SceneArt :variant="(g.scene as any) || 'terrace'" ratio="1 / 1" class="good__art" />
                 <div class="good__body">
-                  <span class="tag tag-brand good__from">来自「{{ expName(g.experience_id) }}」</span>
+                  <span class="tag tag-brand good__from">来自「{{ g.experience_name || '乡村体验' }}」</span>
                   <h3 class="h3 good__name">{{ g.name }}</h3>
                   <p class="muted small">{{ g.spec }} · {{ g.origin_village }}</p>
                   <p class="good__story">{{ g.story }}</p>

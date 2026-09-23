@@ -3,6 +3,7 @@ import { computed } from 'vue'
 import SceneArt from '@/components/SceneArt.vue'
 import { getCityPack } from '@/api/citypack'
 import { isEmpty, useAsync } from '@/composables/useAsync'
+import type { Product } from '@/types'
 
 const { data, loading, error, reload } = useAsync(getCityPack)
 
@@ -15,13 +16,26 @@ const experiences = computed(() => data.value?.experiences ?? [])
 
 const hotScenic = computed(() => scenics.value.slice(0, 4))
 const ruralFeature = computed(() => rurals.value.slice(0, 3))
-const goods = computed(() => products.value.slice(0, 4))
 
-/** 产品 → 体验名（体验溯源，产品详情页与列表都要用） */
-function expName(id?: string) {
-  if (!id) return ''
-  return experiences.value.find((e) => e.id === id)?.name ?? ''
-}
+/**
+ * 乡村好物只放 4 张卡，按分类各取一款。
+ *
+ * 后端的列表顺序是产品编码升序（即数据包的编号顺序），直接切前四条会得到
+ * 三款茶加一款米——读起来像"某一类好物"。改成每个分类取第一款，
+ * 四张卡覆盖四个品类；同时因为茶叶编码在最前，招牌的汉中仙毫仍然排在首位。
+ * 想换首页推荐哪几款，改数据包里的编号顺序即可。
+ */
+const goods = computed<Product[]>(() => {
+  const seen = new Set<string>()
+  const picked: Product[] = []
+  for (const p of products.value) {
+    if (seen.has(p.category)) continue
+    seen.add(p.category)
+    picked.push(p)
+    if (picked.length === 4) break
+  }
+  return picked
+})
 
 const stats = computed(() => [
   { label: '文旅资源点', value: data.value?.pois.length ?? 0, unit: '处' },
@@ -133,7 +147,7 @@ const pillars = [
 
         <div v-else-if="isEmpty(hotScenic)" class="empty">
           <div class="empty__title">暂无景区数据</div>
-          <div class="empty__desc">请确认城市数据包是否同步到 public/data</div>
+          <div class="empty__desc">请确认后端服务已启动，且城市数据包已导入</div>
         </div>
 
         <div v-else class="grid grid-4">
@@ -216,7 +230,7 @@ const pillars = [
           <article v-for="g in goods" :key="g.id" class="gcard card card-hover">
             <SceneArt :variant="(g.scene as any) || 'terrace'" ratio="1 / 1" class="gcard__art" />
             <div class="gcard__body">
-              <span class="tag tag-brand gcard__from">来自「{{ expName(g.experience_id) }}」</span>
+              <span class="tag tag-brand gcard__from">来自「{{ g.experience_name || '乡村体验' }}」</span>
               <h3 class="h3 gcard__title">{{ g.name }}</h3>
               <p class="gcard__spec muted small">{{ g.spec }} · {{ g.origin_village }}</p>
               <p class="gcard__story">{{ g.story }}</p>

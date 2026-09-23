@@ -29,6 +29,8 @@ export interface Poi {
 export interface Experience {
   id: string
   poi_id: string
+  /** 所属乡村点名称，由后端补全（详情页与产品溯源文案都要用） */
+  poi_name?: string
   name: string
   type: string
   duration_min: number
@@ -41,8 +43,16 @@ export interface Experience {
 
 export interface Product {
   id: string
-  poi_id: string
+  poi_id?: string
+  /** 产地乡村点名称，由后端补全 */
+  poi_name?: string
+  /** 体验锚点。产品必须挂产地或体验，至少一项（数据库有 CHECK 约束） */
   experience_id?: string
+  /** 体验锚点名称，由后端补全——"这一款来自哪次体验"是核心信息，不再由前端自己拼 */
+  experience_name?: string
+  /** 分类编码，用于筛选（分类中文名会被改，不能当筛选条件） */
+  category_code?: string
+  /** 分类显示名，用于展示 */
   category: string
   name: string
   spec: string
@@ -52,6 +62,14 @@ export interface Product {
   tags: string[]
   story: string
   scene?: string
+}
+
+/** 农产品分类。product_count 由后端算好，与产品列表出自同一套过滤条件 */
+export interface ProductCategory {
+  code: string
+  name: string
+  sort: number
+  product_count: number
 }
 
 export interface CityMeta {

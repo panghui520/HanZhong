@@ -42,9 +42,9 @@ coverage/
 vite.config.ts.timestamp-*
 *.timestamp-*.mjs
 
-# ---------- 前端构建产物（public/data 由脚本生成，不入库） ----------
+# ---------- 前端构建产物 ----------
+# public/data 曾是本地 JSON 数据源，M2 全量切后端后已删除，不再忽略
 web/dist/
-web/public/data/
 
 # ---------- 向量库 / 本地数据 ----------
 chroma_db/
