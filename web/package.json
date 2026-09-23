@@ -4,8 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "vite",
-    "build": "vue-tsc --noEmit && vite build",
+    "dev": "node ../scripts/sync-citypack.mjs && vite",
+    "build": "node ../scripts/sync-citypack.mjs && vue-tsc --noEmit && vite build",
     "preview": "vite preview",
     "sync:data": "node ../scripts/sync-citypack.mjs"
   },

@@ -1,74 +1,87 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import SceneArt from '@/components/SceneArt.vue'
-import { getCityPack } from '@/api/citypack'
+import { getExperiences, getPoiDetail, getProducts } from '@/api/citypack'
+import { ApiError } from '@/api/http'
 import { useAsync } from '@/composables/useAsync'
-import { BUSINESS_LABEL, type Experience, type Poi, type Product } from '@/types'
+import { BUSINESS_LABEL, type Experience, type Poi, type Product, type RelationItem } from '@/types'
 import { capacityUsage, todayVisitors, weekVisitors, ratingOf } from '@/mock/stats'
 import { reviewsOf } from '@/mock/reviews'
 
 const route = useRoute()
-const { data, loading, error, reload } = useAsync(getCityPack)
 
-const poi = computed<Poi | undefined>(() =>
-  (data.value?.pois ?? []).find((p) => p.id === route.params.id)
+/**
+ * 详情页数据。
+ * 资源本体与四组关系来自后端 /api/pois/{id}——关系是后端按球面距离与业态规则算好的，
+ * 前端不再自己算距离。体验与产品在 M2 之前仍读本地 JSON。
+ *
+ * 资源不存在（后端错误码 1001）返回 null，走"未找到"空状态而不是错误态：
+ * 链接过期、资源下架是正常的产品情况，不该给用户看一行技术性红字。
+ * 错误态留给"连不上后端""服务异常"这类真正需要重试的情况。
+ */
+async function loadDetail(id: string) {
+  try {
+    const [detail, experiences, products] = await Promise.all([
+      getPoiDetail(id),
+      getExperiences(),
+      getProducts(),
+    ])
+    return {
+      detail,
+      experiences: experiences.filter((e) => e.poi_id === id),
+      products: products.filter((p) => p.poi_id === id),
+      allExperiences: experiences,
+    }
+  } catch (e) {
+    if (e instanceof ApiError && e.code === 1001) return null
+    throw e
+  }
+}
+
+const { data, loading, error, reload } = useAsync(() => loadDetail(String(route.params.id)))
+
+// 从「周边联动」点进另一个资源时组件会被复用（路由参数变化不会重建组件），
+// 必须显式重新取数，否则页面会停在上一个资源上。
+watch(
+  () => route.params.id,
+  () => reload()
 )
-const experiences = computed<Experience[]>(() =>
-  (data.value?.experiences ?? []).filter((e) => e.poi_id === route.params.id)
-)
-const products = computed<Product[]>(() =>
-  (data.value?.products ?? []).filter((p) => p.poi_id === route.params.id)
-)
+
+const poi = computed<Poi | undefined>(() => data.value?.detail.poi)
+const experiences = computed<Experience[]>(() => data.value?.experiences ?? [])
+const products = computed<Product[]>(() => data.value?.products ?? [])
 const expName = (id?: string) =>
-  (data.value?.experiences ?? []).find((e) => e.id === id)?.name ?? '乡村体验'
+  (data.value?.allExperiences ?? []).find((e) => e.id === id)?.name ?? '乡村体验'
 
-/** 两点球面距离（km），用于寻找可承接溢出的周边乡村点 */
-function distanceKm(a: Poi, b: Poi) {
-  const R = 6371
-  const dLat = ((b.lat - a.lat) * Math.PI) / 180
-  const dLng = ((b.lng - a.lng) * Math.PI) / 180
-  const s =
-    Math.sin(dLat / 2) ** 2 +
-    Math.cos((a.lat * Math.PI) / 180) * Math.cos((b.lat * Math.PI) / 180) * Math.sin(dLng / 2) ** 2
-  return 2 * R * Math.asin(Math.sqrt(s))
+/**
+ * 距离文案。
+ * 有些住宿点与景区坐标相同（客栈就在古镇里、民宿就在景区内），
+ * 后端算出来是 0km——直接显示 "0 km" 会被当成 bug，这里改说"同址"。
+ */
+function fmtKm(km?: number) {
+  if (km == null) return ''
+  return km < 1 ? '同址' : `${Math.round(km)} km`
 }
 
 const usage = computed(() => (poi.value ? capacityUsage(poi.value.id, poi.value.business_type) : 0))
 const overloaded = computed(() => usage.value >= 0.8)
 
-/** 承载力吃紧时的乡村分流建议：优先同区县/邻近、且自身承载宽裕的乡村点 */
-const diversions = computed(() => {
-  if (!poi.value) return []
-  return (data.value?.pois ?? [])
-    .filter((p) => p.business_type === 'RURAL_SPOT')
-    .map((p) => ({ p, km: distanceKm(poi.value!, p), u: capacityUsage(p.id, p.business_type) }))
-    .filter((x) => x.km <= 90 && x.u < 0.75)
-    .sort((a, b) => a.km - b.km)
+/**
+ * 乡村分流建议。
+ * 候选来自后端的 diversion 关系（景区 → 可承接的乡村，按距离由近到远）；
+ * "当前承载是否宽裕"要等 M5 接入真实客流后才有，这里先用仿真值过滤，
+ * 所以 M1 的这条链路是"空间上可承接"，不含承载判断。
+ */
+const diversions = computed(() =>
+  (data.value?.detail.diversion ?? [])
+    .map((r) => ({ ...r, u: capacityUsage(r.id, r.business_type) }))
+    .filter((r) => r.u < 0.75)
     .slice(0, 3)
-})
+)
 
-const nearby = computed(() => {
-  if (!poi.value) return []
-  return (data.value?.pois ?? [])
-    .filter((p) => p.id !== poi.value!.id && p.business_type === 'SCENIC')
-    .map((p) => ({ p, km: distanceKm(poi.value!, p) }))
-    .filter((x) => x.km <= 60)
-    .sort((a, b) => a.km - b.km)
-    .slice(0, 3)
-})
-
-/** 同区县的配套业态：餐饮 / 住宿 / 交通 —— 体现"多业态融合"不是各管一段 */
-const nearbyBusiness = computed(() => {
-  if (!poi.value) return []
-  const types: Poi['business_type'][] = ['FOOD', 'LODGING', 'TRANSPORT']
-  return (data.value?.pois ?? [])
-    .filter((p) => p.id !== poi.value!.id && types.includes(p.business_type))
-    .map((p) => ({ p, km: distanceKm(poi.value!, p) }))
-    .filter((x) => x.km <= 40)
-    .sort((a, b) => a.km - b.km)
-    .slice(0, 4)
-})
+const nearby = computed<RelationItem[]>(() => data.value?.detail.nearby ?? [])
+const nearbyBusiness = computed<RelationItem[]>(() => data.value?.detail.support ?? [])
 
 const reviews = computed(() => (poi.value ? reviewsOf(poi.value.id, poi.value.business_type) : []))
 
@@ -192,19 +205,19 @@ const rating = computed(() => (poi.value ? ratingOf(poi.value.id) : 0))
             </div>
           </section>
 
-          <!-- 周边景区 -->
+          <!-- 周边联动 -->
           <section v-if="nearby.length" class="block">
             <span class="eyebrow">周边联动</span>
             <h2 class="h2 block__title">同一线路上的其他资源</h2>
             <div class="near">
-              <router-link v-for="n in nearby" :key="n.p.id" :to="`/poi/${n.p.id}`" class="near__item">
-                <span class="near__name">{{ n.p.name }}</span>
-                <span class="num near__km">{{ n.km.toFixed(0) }} km</span>
+              <router-link v-for="n in nearby" :key="n.id" :to="`/poi/${n.id}`" class="near__item">
+                <span class="near__name">{{ n.name }}</span>
+                <span class="num near__km">{{ fmtKm(n.distance_km) }}</span>
               </router-link>
             </div>
           </section>
 
-          <!-- 同区县配套业态 -->
+          <!-- 配套业态 -->
           <section v-if="nearbyBusiness.length" class="block">
             <div class="row-between block__head">
               <div>
@@ -216,13 +229,13 @@ const rating = computed(() => (poi.value ? ratingOf(poi.value.id) : 0))
             <div class="biz">
               <router-link
                 v-for="b in nearbyBusiness"
-                :key="b.p.id"
-                :to="`/poi/${b.p.id}`"
+                :key="b.id"
+                :to="`/poi/${b.id}`"
                 class="biz__item"
               >
-                <span class="tag tag-brand">{{ BUSINESS_LABEL[b.p.business_type] }}</span>
-                <span class="biz__name">{{ b.p.name }}</span>
-                <span class="num biz__km">{{ b.km.toFixed(0) }} km</span>
+                <span class="tag tag-brand">{{ BUSINESS_LABEL[b.business_type] }}</span>
+                <span class="biz__name">{{ b.name }}</span>
+                <span class="num biz__km">{{ fmtKm(b.distance_km) }}</span>
               </router-link>
             </div>
           </section>
@@ -318,12 +331,12 @@ const rating = computed(() => (poi.value ? ratingOf(poi.value.id) : 0))
             </p>
             <router-link
               v-for="d in diversions"
-              :key="d.p.id"
-              :to="`/poi/${d.p.id}`"
+              :key="d.id"
+              :to="`/poi/${d.id}`"
               class="divcard__item"
             >
-              <span class="divcard__name">{{ d.p.name }}</span>
-              <span class="muted small">{{ d.km.toFixed(0) }} km · 承载 {{ Math.round(d.u * 100) }}%</span>
+              <span class="divcard__name">{{ d.name }}</span>
+              <span class="muted small">{{ fmtKm(d.distance_km) }} · 承载 {{ Math.round(d.u * 100) }}%</span>
             </router-link>
           </div>
         </aside>
