@@ -1,0 +1,78 @@
+# ============================================================
+# 汉游智脑 HanYou Brain - Git 忽略配置
+# ============================================================
+
+# ---------- Java / Spring Boot ----------
+target/
+!.mvn/wrapper/maven-wrapper.jar
+!**/src/main/**/target/
+!**/src/test/**/target/
+*.class
+*.log
+.mvn/timing.properties
+httpsession/
+
+# ---------- Python / FastAPI ----------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.venv/
+venv/
+env/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# ---------- Node / 前端 ----------
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+.vite/
+.cache/
+coverage/
+
+# ---------- 向量库 / 本地数据 ----------
+chroma_db/
+chroma.sqlite3
+data/vectorstore/
+*.chroma
+
+# ---------- 密钥与本地配置（绝不入库）----------
+.env
+.env.*
+!.env.example
+*.local
+application-secret.yml
+application-secret.properties
+secrets/
+*.pem
+*.key
+
+# ---------- IDE / 编辑器 ----------
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/*
+!.vscode/settings.example.json
+*.swp
+*.swo
+
+# ---------- 系统文件 ----------
+.DS_Store
+Thumbs.db
+desktop.ini
+ehthumbs.db
+
+# ---------- 比赛材料临时产物 ----------
+docs/_build/
+docs/导出/
+*.tmp
+~$*.docx
