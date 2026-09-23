@@ -1,0 +1,12 @@
+[
+  { "code": "CAT-TEA", "name": "茶叶", "sort": 10 },
+  { "code": "CAT-MUSHROOM", "name": "食用菌", "sort": 20 },
+  { "code": "CAT-HONEY", "name": "蜂蜜", "sort": 30 },
+  { "code": "CAT-GRAIN", "name": "粮油", "sort": 40 },
+  { "code": "CAT-FRESH", "name": "生鲜", "sort": 50 },
+  { "code": "CAT-CURED", "name": "腊味", "sort": 60 },
+  { "code": "CAT-POULTRY", "name": "禽蛋", "sort": 70 },
+  { "code": "CAT-PROCESSED", "name": "加工品", "sort": 80 },
+  { "code": "CAT-HERBAL", "name": "中药材", "sort": 90 },
+  { "code": "CAT-CRAFT", "name": "文创非遗", "sort": 100 }
+]

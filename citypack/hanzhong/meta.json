@@ -8,5 +8,5 @@
   "data_origin": "PUBLIC",
   "disclaimer": "本数据包中 POI 名称、行政区划、景区等级、简介等事实性内容整理自汉中市文化和旅游局等公开渠道；经纬度、承载力、建议时长、客流时序、订单与评价数据均为基于规则的估算或仿真值（data_origin=SYNTHETIC），不代表任何真实统计口径，仅用于系统功能演示。禁止用于商业决策或对外发布。",
   "synthetic_note": "所有 SYNTHETIC 字段由 scripts/gen_synthetic.py 生成，脚本入库可复现。",
-  "version": "0.1.0"
+  "version": "0.2.0"
 }
