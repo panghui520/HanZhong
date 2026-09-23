@@ -1,0 +1,29 @@
+# 统一行尾，避免 Linux 容器里 .sh 变 CRLF 直接跑不起来
+* text=auto
+
+# 脚本与 Docker 相关文件必须 LF
+*.sh        text eol=lf
+*.bash      text eol=lf
+Dockerfile* text eol=lf
+*.dockerfile text eol=lf
+*.yml       text eol=lf
+*.yaml      text eol=lf
+*.conf      text eol=lf
+
+# Windows 专用脚本保持 CRLF
+*.bat       text eol=crlf
+*.cmd       text eol=crlf
+*.ps1       text eol=crlf
+
+# 二进制文件不做任何转换
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.svg text
+*.pdf binary
+*.jar binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
