@@ -168,6 +168,18 @@ const props = withDefaults(
       <g v-else-if="variant === 'ancient'">
         <rect width="1200" height="675" fill="#f4efe3" />
         <circle cx="180" cy="120" r="120" :fill="`url(#sun-${variant})`" />
+        <!--
+          远山。资源详情页的 Hero 是超宽扁容器（约 4:1），而画布是 1.78:1，
+          preserveAspectRatio="slice" 居中裁切后只露出纵向中间一段（约 y 194–481）。
+          没有这层的话那一段的上半部分是空白天空，画面里只剩屋檐的横条，
+          看起来像几条色带而不是一幅画。山峦叠在后面，建筑在前，层次就回来了。
+          卡片（16:10）里裁的是左右两侧，这层山同样成立。
+        -->
+        <path
+          d="M0 236 C130 206 250 228 380 212 C510 196 630 224 760 210 C890 196 1010 222 1130 210 C1160 207 1185 214 1200 211 L1200 320 L0 320 Z"
+          :fill="`url(#far-${variant})`"
+        />
+        <rect x="0" y="226" width="1200" height="58" :fill="`url(#mist-${variant})`" opacity="0.65" />
         <!-- 远檐 -->
         <path
           d="M0 300 L1200 300 L1200 330 L0 330 Z"
