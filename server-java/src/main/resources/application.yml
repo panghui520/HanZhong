@@ -1,0 +1,45 @@
+server:
+  port: 8080
+  servlet:
+    encoding:
+      charset: UTF-8
+      enabled: true
+      force: true
+
+spring:
+  application:
+    name: hanyou-brain-server
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: jdbc:mysql://${MYSQL_HOST:127.0.0.1}:${MYSQL_PORT:3306}/${MYSQL_DB:hanyou_brain}?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&useSSL=false
+    username: ${MYSQL_USER:root}
+    password: ${MYSQL_PASSWORD:1234}
+  jackson:
+    default-property-inclusion: non_null
+    time-zone: Asia/Shanghai
+    date-format: yyyy-MM-dd HH:mm:ss
+
+mybatis-plus:
+  configuration:
+    # 数据库下划线 -> Java 驼峰
+    map-underscore-to-camel-case: true
+    # 开发期把 SQL 打到控制台，方便调试与答辩演示
+    log-impl: org.apache.ibatis.logging.stdout.StdOutImpl
+  global-config:
+    banner: false
+    db-config:
+      id-type: input
+      logic-delete-field: null
+
+hanyou:
+  # 城市数据包目录。默认相对 server-java 的上一级，即仓库根目录下的 citypack/
+  citypack-dir: ${CITYPACK_DIR:../citypack}
+  # 当前城市，换城市只改这里
+  city: ${CITY_PACK:hanzhong}
+  # 启动时是否用 CityPack 覆盖导入数据库
+  import-on-startup: true
+
+logging:
+  level:
+    root: info
+    com.hanyou.brain: debug
