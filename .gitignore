@@ -38,6 +38,14 @@ yarn-error.log*
 .cache/
 coverage/
 
+# ---------- Vite 临时文件 ----------
+vite.config.ts.timestamp-*
+*.timestamp-*.mjs
+
+# ---------- 前端构建产物（public/data 由脚本生成，不入库） ----------
+web/dist/
+web/public/data/
+
 # ---------- 向量库 / 本地数据 ----------
 chroma_db/
 chroma.sqlite3
