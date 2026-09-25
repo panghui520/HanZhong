@@ -1,5 +1,7 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
+import { useSessionStore } from '@/stores/session'
 
 const scrolled = ref(false)
 function onScroll() {
@@ -9,18 +11,73 @@ onMounted(() => {
   onScroll()
   window.addEventListener('scroll', onScroll, { passive: true })
 })
-onUnmounted(() => window.removeEventListener('scroll', onScroll))
+onUnmounted(() => {
+  window.removeEventListener('scroll', onScroll)
+  document.removeEventListener('click', onDocClick)
+})
+
+const session = useSessionStore()
+const router = useRouter()
+const route = useRoute()
+
+/** 首页 Hero 是全屏大图，顶栏在未滚动前保持透明压在图上 */
+const overHero = computed(() => route.name === 'home' && !scrolled.value)
 
 const navs = [
   { label: '首页', to: '/' },
   { label: '探索汉中', to: '/explore' },
+  { label: '行程规划', to: '/itinerary' },
+  { label: '知识问答', to: '/assistant' },
 ]
+
+/* ---------- 用户菜单 ---------- */
+const menuOpen = ref(false)
+function toggleMenu() {
+  menuOpen.value = !menuOpen.value
+}
+function onDocClick(e: MouseEvent) {
+  const el = e.target as HTMLElement | null
+  if (el && !el.closest('.usermenu')) menuOpen.value = false
+}
+document.addEventListener('click', onDocClick)
+
+/**
+ * 管理入口的落点。
+ *
+ * 三种情况要说清楚，免得用户点了一个"管理入口"却毫无反应：
+ *   - 已登录的运营：进驾驶舱
+ *   - 未登录：去登录页
+ *   - 已登录的游客：**不显示这个入口** —— 他点了也进不去（后端 4003），
+ *     给他一个必然失败的按钮是误导。所以下面用 v-if 挡掉。
+ */
+const adminEntry = computed(() => (
+  session.isAdmin
+    ? { to: '/admin/dashboard', label: '运营驾驶舱' }
+    : { to: '/login', label: '管理入口' }
+))
+
+/**
+ * 退出登录（M8）。
+ *
+ * 必须 await：旧版是本地清一下就完事，现在要先调 /api/me/logout
+ * 让服务端把 token_version +1，否则本地登出了、令牌在服务端还有效，
+ * 拿抓包工具复制出来的旧令牌仍然能用 —— 那是"看起来退出了"。
+ * store 内部保证接口失败也会清本地，所以这里不用包 try/catch。
+ */
+async function logout() {
+  menuOpen.value = false
+  await session.logout()
+  router.push('/')
+}
 </script>
 
 <template>
   <div class="portal">
-    <header class="nav" :class="{ 'nav--solid': scrolled }">
-      <div class="container nav__inner">
+    <header
+      class="nav"
+      :class="{ 'nav--solid': scrolled || !overHero, 'nav--over': overHero }"
+    >
+      <div class="container container-wide nav__inner">
         <router-link to="/" class="brand">
           <span class="brand__seal">汉</span>
           <span class="brand__text">
@@ -36,8 +93,59 @@ const navs = [
         </nav>
 
         <div class="nav__actions">
-          <router-link to="/admin/dashboard" class="btn btn-ghost btn-sm">
-            管理驾驶舱
+          <!-- 未登录：明确给出「登录 / 注册」入口 -->
+          <router-link
+            v-if="!session.isLoggedIn"
+            to="/login"
+            class="nav__login"
+          >
+            登录 / 注册
+          </router-link>
+
+          <!-- 已登录：展示身份 + 下拉 -->
+          <div v-else class="usermenu">
+            <button class="usermenu__trigger" @click.stop="toggleMenu">
+              <span class="usermenu__avatar">{{ session.displayName.slice(0, 1) }}</span>
+              <span class="usermenu__name">{{ session.displayName }}</span>
+              <span v-if="session.isAdmin" class="tag tag-gold usermenu__role">运营</span>
+              <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">
+                <path
+                  d="M6 9 L12 15 L18 9"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.8"
+                  stroke-linecap="round"
+                />
+              </svg>
+            </button>
+            <div v-if="menuOpen" class="usermenu__panel">
+              <router-link v-if="session.isAdmin" to="/admin/dashboard" class="usermenu__item">
+                运营驾驶舱
+              </router-link>
+              <router-link v-else to="/itinerary" class="usermenu__item">
+                我的行程
+              </router-link>
+              <router-link v-if="!session.isAdmin" to="/assistant" class="usermenu__item">
+                知识问答
+              </router-link>
+              <button class="usermenu__item usermenu__item--danger" @click="logout">
+                退出登录
+              </button>
+            </div>
+          </div>
+
+          <!--
+            管理入口（M8）。旧版会跳 `/login?role=admin` 让用户"选身份"，
+            现在角色由后端按账号判定，登录时选不了 —— 所以这个入口只做导航：
+            是 OPERATOR 直接进驾驶舱，否则去登录页（未登录）或留在原地（已登录的普通游客）。
+            已登录的游客看不到它：给他一个点了必然 4003 的按钮是误导。
+          -->
+          <router-link
+            v-if="!session.isLoggedIn || session.isAdmin"
+            :to="adminEntry.to"
+            class="btn btn-ghost btn-sm nav__admin"
+          >
+            {{ adminEntry.label }}
           </router-link>
         </div>
       </div>
@@ -60,6 +168,13 @@ const navs = [
           <div class="footer__col">
             <div class="footer__title">平台</div>
             <router-link to="/explore">探索汉中</router-link>
+            <router-link to="/itinerary">行程规划</router-link>
+            <router-link to="/assistant">知识问答</router-link>
+            <router-link to="/login">登录 / 注册</router-link>
+          </div>
+          <div class="footer__col">
+            <div class="footer__title">运营方</div>
+            <router-link to="/login?role=admin">运营管理登录</router-link>
             <router-link to="/admin/dashboard">管理驾驶舱</router-link>
           </div>
           <div class="footer__col">
@@ -100,6 +215,54 @@ const navs = [
   backdrop-filter: saturate(150%) blur(12px);
   border-bottom-color: var(--line-soft);
 }
+
+/* 首页压在超大 Hero 上：透明底 + 反白，滚下去再变实底 */
+.nav--over {
+  background: linear-gradient(180deg, rgba(11, 33, 25, 0.42) 0%, rgba(11, 33, 25, 0) 100%);
+}
+.nav--over .brand__name {
+  color: #fff;
+}
+.nav--over .brand__sub {
+  color: rgba(255, 255, 255, 0.58);
+}
+.nav--over .brand__seal {
+  background: rgba(255, 255, 255, 0.12);
+  color: var(--gold-300);
+  box-shadow: inset 0 0 0 1px rgba(226, 202, 145, 0.6);
+}
+.nav--over .nav__link {
+  color: rgba(255, 255, 255, 0.86);
+}
+.nav--over .nav__link:hover,
+.nav--over .nav__link.router-link-exact-active {
+  color: #fff;
+}
+.nav--over .nav__login {
+  color: #fff;
+  border-color: rgba(255, 255, 255, 0.42);
+}
+.nav--over .nav__login:hover {
+  background: rgba(255, 255, 255, 0.16);
+  border-color: rgba(255, 255, 255, 0.82);
+}
+.nav--over .nav__admin {
+  color: rgba(255, 255, 255, 0.9);
+  border-color: rgba(255, 255, 255, 0.28);
+}
+.nav--over .nav__admin:hover {
+  background: rgba(255, 255, 255, 0.14);
+  border-color: rgba(255, 255, 255, 0.6);
+  color: #fff;
+}
+.nav--over .usermenu__trigger {
+  color: #fff;
+  border-color: rgba(255, 255, 255, 0.3);
+}
+.nav--over .usermenu__trigger:hover {
+  background: rgba(255, 255, 255, 0.14);
+}
+
 .nav__inner {
   height: 100%;
   display: flex;
@@ -182,6 +345,103 @@ const navs = [
 
 .nav__actions {
   margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+}
+
+/* ---------- 登录入口 ---------- */
+.nav__login {
+  display: inline-flex;
+  align-items: center;
+  height: 34px;
+  padding: 0 var(--sp-4);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--brand-700);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  transition: all var(--dur-1) var(--ease);
+}
+.nav__login:hover {
+  border-color: var(--brand-500);
+  background: var(--brand-50);
+}
+
+/* ---------- 用户菜单 ---------- */
+.usermenu {
+  position: relative;
+}
+.usermenu__trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  height: 34px;
+  padding: 0 var(--sp-3) 0 4px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  color: var(--ink-700);
+  transition: all var(--dur-1) var(--ease);
+}
+.usermenu__trigger:hover {
+  border-color: var(--brand-300);
+  background: var(--brand-50);
+}
+.usermenu__avatar {
+  width: 26px;
+  height: 26px;
+  display: grid;
+  place-items: center;
+  background: var(--brand-700);
+  color: var(--gold-300);
+  font-size: 13px;
+  font-weight: 600;
+  border-radius: var(--r-sm);
+  flex: none;
+}
+.usermenu__name {
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  max-width: 96px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.usermenu__role {
+  height: 20px;
+  padding: 0 7px;
+  font-size: 10px;
+}
+.usermenu__panel {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 8px);
+  z-index: var(--z-pop);
+  min-width: 172px;
+  padding: var(--sp-2);
+  background: #fff;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--r-md);
+  box-shadow: var(--sh-3);
+  animation: fadeUp var(--dur-1) var(--ease) both;
+}
+.usermenu__item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 8px var(--sp-3);
+  font-size: var(--fs-xs);
+  color: var(--ink-700);
+  border-radius: var(--r-sm);
+  transition: background var(--dur-1) var(--ease);
+}
+.usermenu__item:hover {
+  background: var(--brand-50);
+  color: var(--brand-700);
+}
+.usermenu__item--danger:hover {
+  background: var(--danger-50);
+  color: var(--danger);
 }
 
 /* ---------- 页脚 ---------- */

@@ -13,14 +13,12 @@ export default defineConfig({
     port: 5173,
     host: '127.0.0.1',
     proxy: {
-      // Java 业务后端
+      // 只代理 Java 业务后端。AI 能力走 /api/ai/**，由 Java 再转发给 Python，
+      // 所以这里刻意没有 /ai -> 8000 这条规则：留着它等于给"绕过业务层直连
+      // Python"开了条路，而 Python 只监听回环地址且要求内部令牌，
+      // 前端直连既不安全也维护不了两套入口。
       '/api': {
         target: 'http://127.0.0.1:8080',
-        changeOrigin: true,
-      },
-      // Python AI 服务
-      '/ai': {
-        target: 'http://127.0.0.1:8000',
         changeOrigin: true,
       },
     },

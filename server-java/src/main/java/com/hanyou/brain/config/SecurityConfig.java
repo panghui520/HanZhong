@@ -1,0 +1,156 @@
+package com.hanyou.brain.config;
+
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.http.HttpMethod;
+import org.springframework.security.config.Customizer;
+import org.springframework.security.config.annotation.method.configuration.EnableMethodSecurity;
+import org.springframework.security.config.annotation.web.builders.HttpSecurity;
+import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
+import org.springframework.security.config.http.SessionCreationPolicy;
+import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
+import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.security.web.SecurityFilterChain;
+import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
+import org.springframework.web.cors.CorsConfiguration;
+import org.springframework.web.cors.CorsConfigurationSource;
+import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
+
+import com.hanyou.brain.auth.AuthJsonHandlers;
+import com.hanyou.brain.auth.JwtAuthFilter;
+
+import java.util.List;
+
+import lombok.RequiredArgsConstructor;
+
+/**
+ * Spring Security 配置（M8）。
+ *
+ * <p>三条贯穿全文件的原则：
+ *
+ * <p><b>1. 只放行已知路径，其余默认要登录。</b>
+ * 这里把 M1/M2/M3 的全部公开接口逐条列出来 permitAll。
+ * 列白名单比列黑名单长，但安全方向是对的：以后新加一个接口忘了配置，
+ * 结果是"访问不了"（立刻发现），而不是"任何人都能访问"（可能一直没人发现）。
+ *
+ * <p><b>2. 无状态。</b>令牌走请求头，不建 Session。所以关掉 CSRF——
+ * CSRF 攻击依赖浏览器自动携带 Cookie，而我们根本不发 Cookie，
+ * 开着它反而会让所有 POST 都要求一个前端拿不到的 token。
+ *
+ * <p><b>3. 失败也返回 HTTP 200 + Result。</b>见 {@link AuthJsonHandlers} 的注释。
+ */
+@Configuration
+@EnableWebSecurity
+@EnableMethodSecurity
+@RequiredArgsConstructor
+public class SecurityConfig {
+
+    private final JwtAuthFilter jwtAuthFilter;
+    private final AuthJsonHandlers authJsonHandlers;
+
+    /** 运营管理端接口前缀。前端管理端页面全部打到这里，后续模块的运营接口也复用 */
+    public static final String ADMIN_PREFIX = "/api/admin/**";
+
+    @Bean
+    public SecurityFilterChain filterChain(HttpSecurity http) throws Exception {
+        http
+                // 无状态 + 令牌在请求头 => 浏览器不会自动附带凭证，CSRF 不成立
+                .csrf(csrf -> csrf.disable())
+                // 复用 WebConfig 里的跨域规则，避免两处各写一套来源白名单
+                .cors(Customizer.withDefaults())
+                .sessionManagement(s -> s.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
+                .formLogin(f -> f.disable())
+                .httpBasic(b -> b.disable())
+                .logout(l -> l.disable())
+                .authorizeHttpRequests(auth -> auth
+                        // 预检请求必须放行：浏览器不会在 OPTIONS 上带 Authorization，
+                        // 拦掉它会让所有跨域 POST 在预检阶段就失败，且报错指向 CORS，很难定位
+                        .requestMatchers(HttpMethod.OPTIONS, "/**").permitAll()
+
+                        // ---------------- 公开：认证入口本身 ----------------
+                        .requestMatchers("/api/auth/**").permitAll()
+
+                        // ---------------- 公开：M1 统一资源 ----------------
+                        // 这些是游客端的浏览能力，登录与否都能看。M8 不改变它们的行为。
+                        .requestMatchers(HttpMethod.GET,
+                                "/api/city",
+                                "/api/pois", "/api/pois/**")
+                        .permitAll()
+
+                        // ---------------- 公开：M2 乡村体验与农产品 ----------------
+                        .requestMatchers(HttpMethod.GET,
+                                "/api/experiences", "/api/experiences/**",
+                                "/api/products", "/api/products/**",
+                                "/api/product-categories")
+                        .permitAll()
+
+                        // ---------------- 公开：M3 文旅知识问答 ----------------
+                        // 问答本身是公开能力；限流与配额属于后续模块的事
+                        .requestMatchers("/api/ai/**").permitAll()
+
+                        // ---------------- 公开：M9 媒体与配图 ----------------
+                        // 这条前缀承担两件事：
+                        //   1) 游客端读轮播图与景点配图（/api/media/banners 等）
+                        //   2) 运营上传的图片文件本身（/api/media/poi/xxx/yyy.jpg），
+                        //      由 WebConfig 的静态资源映射直出
+                        // 只放行 GET：写操作全在 /api/admin/media/** 下，由下面的
+                        // ADMIN_PREFIX 规则兜住。这里若不限定方法，等于把删除图片
+                        // 文件的通道也开给了游客。
+                        .requestMatchers(HttpMethod.GET, "/api/media/**").permitAll()
+
+                        // ---------------- 需要登录：运营管理端 ----------------
+                        // 放在最前面写，是因为它比下面的 GET 规则更具体。
+                        // Spring Security 按声明顺序匹配第一条命中的规则，
+                        // 若把这条挪到 GET 通配之后，GET /api/admin/xxx 会被通配先接走。
+                        .requestMatchers(ADMIN_PREFIX).hasRole("OPERATOR")
+
+                        // 认证后与个人相关的接口（当前只有 me/logout，见 AuthController）
+                        .requestMatchers("/api/me/**").authenticated()
+
+                        // ---------------- 兜底 ----------------
+                        // 没被上面任何一条命中的路径一律要登录。
+                        // 新增接口时这里是最后一道提醒：要么显式 permitAll，要么就是受保护的。
+                        .anyRequest().authenticated())
+                .exceptionHandling(e -> e
+                        .authenticationEntryPoint(authJsonHandlers)
+                        .accessDeniedHandler(authJsonHandlers))
+                // 放在用户名密码过滤器之前：JWT 不需要表单登录那一步
+                .addFilterBefore(jwtAuthFilter, UsernamePasswordAuthenticationFilter.class);
+
+        return http.build();
+    }
+
+    /**
+     * 密码哈希器。
+     *
+     * <p>BCrypt 自带随机盐并把盐写进哈希串本身，所以不需要额外的 salt 列。
+     * 强度用默认的 10（约 2^10 次迭代）：注册/登录各一次，耗时几十毫秒，
+     * 用户无感，而离线爆破成本已经足够高。
+     */
+    @Bean
+    public PasswordEncoder passwordEncoder() {
+        return new BCryptPasswordEncoder();
+    }
+
+    /**
+     * 跨域配置。与 {@link WebConfig#addCorsMappings} 保持一致。
+     *
+     * <p>Spring Security 的 cors() 只认这个 Bean，不会去读 WebMvcConfigurer 里的配置——
+     * 不显式声明的话，被拦截的请求会在进入 MVC 之前就被拒，浏览器报的却是 CORS 错误。
+     */
+    @Bean
+    public CorsConfigurationSource corsConfigurationSource() {
+        CorsConfiguration cfg = new CorsConfiguration();
+        cfg.setAllowedOriginPatterns(List.of("http://localhost:*", "http://127.0.0.1:*"));
+        // 与 WebConfig#addCorsMappings 保持一致。PATCH 是 M9 改备注/改文案用的，
+        // 两处都漏掉的话，跨域预检会在进入 Security 之前就失败
+        cfg.setAllowedMethods(List.of("GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"));
+        cfg.setAllowedHeaders(List.of("*"));
+        cfg.setAllowCredentials(true);
+        cfg.setMaxAge(3600L);
+
+        UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();
+        source.registerCorsConfiguration("/api/**", cfg);
+        return source;
+    }
+}

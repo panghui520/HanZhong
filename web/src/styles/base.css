@@ -164,6 +164,27 @@ select {
   height: 1px;
   background: var(--gold-500);
 }
+/* 反白版本：叠在深色图上用 */
+.eyebrow--light {
+  color: var(--gold-300);
+}
+.eyebrow--light::before {
+  background: var(--gold-300);
+}
+
+/* ---------- 大字阶（仅 Hero 与整幅强调带） ---------- */
+.mega {
+  font-family: var(--font-display);
+  font-size: var(--fs-mega);
+  line-height: 1.14;
+  letter-spacing: 0.02em;
+  font-weight: 600;
+}
+.lead {
+  font-size: var(--fs-lead);
+  line-height: 1.85;
+  color: var(--ink-600);
+}
 
 /* ---------- 布局 ---------- */
 .container {
@@ -172,12 +193,23 @@ select {
   margin: 0 auto;
   padding: 0 var(--sp-6);
 }
+/* 宽容器：只给首页大图区块用，和普通内容区形成宽度反差 */
+.container-wide {
+  max-width: var(--container-wide);
+}
 
 .section {
   padding: var(--sp-8) 0;
 }
 .section-lg {
   padding: var(--sp-9) 0;
+}
+/* 大留白区块：整幅大图带 / 强调带 */
+.section-xl {
+  padding: var(--sp-10) 0;
+}
+.section-0 {
+  padding: 0;
 }
 
 .stack-1 > * + * {
@@ -283,6 +315,41 @@ select {
   height: 50px;
   padding: 0 var(--sp-6);
   font-size: var(--fs-body);
+}
+
+/* 描边按钮（反白）：叠在深色大图上，不与主色打架 */
+.btn-line {
+  background: rgba(255, 255, 255, 0.06);
+  color: #fff;
+  border: 1px solid rgba(255, 255, 255, 0.42);
+  backdrop-filter: blur(2px);
+}
+.btn-line:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.16);
+  border-color: rgba(255, 255, 255, 0.8);
+}
+
+/* 文字链接按钮：用于区块标题右侧「查看全部」 */
+.btn-text {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: auto;
+  padding: 0;
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--brand-700);
+  letter-spacing: 0.02em;
+}
+.btn-text::after {
+  content: "";
+  width: 16px;
+  height: 1px;
+  background: var(--gold-500);
+  transition: width var(--dur-2) var(--ease);
+}
+.btn-text:hover::after {
+  width: 26px;
 }
 
 /* ---------- 标签 ---------- */
@@ -401,12 +468,41 @@ select {
   }
 }
 
+/* 滚动进入视口后淡入：只做位移 + 透明度，不做缩放 / 旋转 / 发光 */
+.reveal {
+  opacity: 0;
+  transform: translateY(22px);
+  transition: opacity 700ms var(--ease), transform 700ms var(--ease);
+  will-change: opacity, transform;
+}
+.reveal.is-in {
+  opacity: 1;
+  transform: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .reveal {
+    opacity: 1;
+    transform: none;
+    transition: none;
+  }
+  .fade-up {
+    animation: none;
+  }
+}
+
 /* ---------- 响应式：只保留三档，够用且不散 ---------- */
+@media (max-width: 1440px) {
+  :root {
+    --hero-h: min(84vh, 780px);
+  }
+}
+
 @media (max-width: 1080px) {
   :root {
     --fs-display: 38px;
     --fs-h1: 28px;
     --fs-h2: 21px;
+    --hero-h: min(78vh, 640px);
   }
   .grid-4 {
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -422,12 +518,15 @@ select {
     --fs-h1: 24px;
     --fs-h2: 19px;
     --nav-h: 58px;
+    --hero-h: 520px;
+    --fs-mega: 34px;
   }
   .container {
     padding: 0 var(--sp-4);
   }
   .section,
-  .section-lg {
+  .section-lg,
+  .section-xl {
     padding: var(--sp-7) 0;
   }
   .grid-2,

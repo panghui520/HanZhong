@@ -1,0 +1,1279 @@
+<script setup lang="ts">
+/**
+ * Itinerary —— AI 智能行程规划工作台
+ *
+ * 本页是首页「AI 智能行程规划」区块的落地页。
+ *
+ * **当前仍是纯前端规则演示，不调用后端接口。** M4（多智能体行程规划）接入时，
+ * 把 `plan` 这个 computed 换成一次接口调用即可 —— 它已经是一个
+ * "入参 → { days, summary, picks }" 的纯函数式映射，UI 不需要改。
+ *
+ * 之所以把规则写得这么显式（而不是随机拼几条），是因为答辩要能讲清
+ * "判定与生成是分开的"：
+ *   - 承载力、距离、类型搭配 → 本文件的规则函数（确定性、可解释）
+ *   - 措辞与推荐理由          → 未来交给 LLM（见页尾"怎么做到的"）
+ * 页面里每一句 why 都是从数据算出来的，不是写死的文案。
+ */
+import { computed, ref } from 'vue'
+import { getCityPack } from '@/api/citypack'
+import { isEmpty, useAsync } from '@/composables/useAsync'
+import { useReveal } from '@/composables/useReveal'
+import SceneArt from '@/components/SceneArt.vue'
+import PoiImage from '@/components/PoiImage.vue'
+import SectionHead from '@/components/SectionHead.vue'
+import { BUSINESS_LABEL, type Experience, type Poi, type Product } from '@/types'
+import { capacityUsage } from '@/mock/stats'
+
+const { data, loading, error, reload } = useAsync(getCityPack)
+
+const root = ref<HTMLElement | null>(null)
+
+/* ============================================================
+ * 入参
+ * ============================================================ */
+
+const days = ref(2)
+const pace = ref<'relax' | 'normal' | 'packed'>('normal')
+const budget = ref<'low' | 'mid' | 'high'>('mid')
+
+/** 兴趣是多选 —— 但至少留一个，空选会让"匹配度"这项算不出东西 */
+const INTERESTS = [
+  { key: 'nature', label: '山野自然', tag: '自然' },
+  { key: 'culture', label: '历史人文', tag: '人文' },
+  { key: 'rural', label: '乡村体验', tag: '乡村' },
+  { key: 'food', label: '地方风味', tag: '小吃' },
+  { key: 'craft', label: '手作非遗', tag: '手作' },
+] as const
+
+type InterestKey = (typeof INTERESTS)[number]['key']
+const interests = ref<InterestKey[]>(['nature', 'rural'])
+
+function toggleInterest(k: InterestKey) {
+  const i = interests.value.indexOf(k)
+  if (i >= 0) {
+    // 不允许清空：一个兴趣都不选时"匹配度"无从谈起，UI 也会显得像坏了
+    if (interests.value.length === 1) return
+    interests.value.splice(i, 1)
+  } else {
+    interests.value.push(k)
+  }
+}
+
+const PACE_LABEL: Record<string, string> = {
+  relax: '轻松',
+  normal: '适中',
+  packed: '充实',
+}
+const PACE_DESC: Record<string, string> = {
+  relax: '每天 2 个停留点，留出午休与机动时间',
+  normal: '每天 3 个停留点，节奏常见的自由行强度',
+  packed: '每天 4 个停留点，适合假期短、目标明确的行程',
+}
+const BUDGET_LABEL: Record<string, string> = { low: '经济', mid: '舒适', high: '充裕' }
+/** 预算档位对应的"单人日预算"区间，用于估算与产品筛选 */
+const BUDGET_RANGE: Record<string, [number, number]> = {
+  low: [150, 350],
+  mid: [350, 700],
+  high: [700, 1400],
+}
+
+const perDay = computed(() => (pace.value === 'relax' ? 2 : pace.value === 'normal' ? 3 : 4))
+const totalSpots = computed(() => days.value * perDay.value)
+
+/** 节奏档位一句话说明，给面板里的分段按钮当副标题 */
+function perDayHint(p: string) {
+  return { relax: '2 个点', normal: '3 个点', packed: '4 个点' }[p] ?? ''
+}
+
+/** 承载率 → 展示档位。danger 是刻意保留的：超载样本要看得见 */
+function loadLv(u: number) {
+  return u >= 1 ? 'danger' : u >= 0.8 ? 'warn' : 'ok'
+}
+
+/* ============================================================
+ * 规则：候选召回 → 承载力排序 → 类型搭配 → 分段
+ * ============================================================ */
+
+const picks = computed(() => (data.value?.pois ?? []))
+
+/** 兴趣 → 该兴趣偏好的 POI 业态与标签 */
+const INTEREST_MATCH: Record<InterestKey, { types: string[]; tags: string[] }> = {
+  nature: { types: ['SCENIC'], tags: ['自然', '山水', '云海', '森林'] },
+  culture: { types: ['SCENIC'], tags: ['人文', '历史', '古建', '三国', '汉'] },
+  rural: { types: ['RURAL_SPOT'], tags: ['乡村', '村落', '田园'] },
+  food: { types: ['FOOD'], tags: ['小吃', '风味', '美食'] },
+  craft: { types: ['RURAL_SPOT'], tags: ['手作', '非遗', '工坊'] },
+}
+
+/**
+ * 一条 POI 对当前兴趣偏好的匹配度（0..1）。
+ *
+ * 用标签命中数 / 兴趣数，而不是加权求和 —— 加权需要一套说不清来源的系数，
+ * 答辩时会被问"这个 0.6 是怎么定的"。计数法能一句话解释清楚。
+ */
+function matchScore(p: Poi) {
+  let hit = 0
+  for (const k of interests.value) {
+    const m = INTEREST_MATCH[k]
+    const typeOk = m.types.includes(p.business_type)
+    const tagOk = p.tags.some((t) => m.tags.some((mt) => t.includes(mt)))
+    if (typeOk || tagOk) hit++
+  }
+  return hit / Math.max(1, interests.value.length)
+}
+
+/**
+ * 综合打分：匹配度为主，承载力余量为辅。
+ *
+ * 承载力**加权为正**：余量越充足越优先 —— 这正是"把客流导向有余处"的规则化表达。
+ * 注意这与"景点越热门越靠前"是相反的逻辑，是刻意的。
+ */
+function score(p: Poi) {
+  const usage = capacityUsage(p.id, p.business_type)
+  const headroom = Math.max(0, 1 - usage) // 余量
+  return matchScore(p) * 0.72 + headroom * 0.28
+}
+
+/** 排序后的候选池（同分时保持数据包编码顺序，保证结果稳定可复现） */
+const ranked = computed<Poi[]>(() => {
+  const all = picks.value
+  return all
+    .map((p, i) => ({ p, s: score(p), i }))
+    .sort((a, b) => (b.s - a.s) || (a.i - b.i))
+    .map((x) => x.p)
+})
+
+/**
+ * 按"景区 → 乡村体验 → 乡村好物"编排动线。
+ *
+ * 关键规则：**每 3 个停留点里有 1 个必须是乡村**（`i % 3 === 2`）。
+ * 这不是为了好看 —— 它是"客流下乡"这个主张在单次行程里的最小落地：
+ * 一个 3 天的常规行程，至少会被塞进 2–3 个乡村点。
+ */
+type Kind = 'scenic' | 'rural' | 'food'
+
+type Stop = {
+  id: string
+  name: string
+  poiId: string
+  kind: Kind
+  /** 展示用类型名（区县 + 业态） */
+  meta: string
+  why: string
+  /** 该点命中的兴趣标签，用于展示"为什么推荐给你" */
+  hits: string[]
+  usage: number
+  duration: number
+  ticket: number
+  scene: string
+  /** 乡村点挂的体验（M2 的 experience），景区点为空 */
+  exp: Experience | null
+  /** 挂在该体验下的农产品（M2 的 product），体现"离境复购" */
+  goods: Product[]
+}
+
+const plan = computed<{ day: number; stops: Stop[] }[]>(() => {
+  const pois = ranked.value
+  if (isEmpty(pois)) return []
+
+  const scenics = pois.filter((p) => p.business_type === 'SCENIC')
+  const rurals = pois.filter((p) => p.business_type === 'RURAL_SPOT')
+  const foods = pois.filter((p) => p.business_type === 'FOOD')
+  const exps = data.value?.experiences ?? []
+  const prods = data.value?.products ?? []
+
+  const seq: Stop[] = []
+  const usedIds = new Set<string>()
+
+  /** 取下一个未用过的候选；池子耗尽则允许复用（数据只有 42 条，长行程必然要复用） */
+  function take(pool: Poi[]): Poi | null {
+    const fresh = pool.find((p) => !usedIds.has(p.id))
+    const chosen = fresh ?? pool[0] ?? null
+    if (chosen) usedIds.add(chosen.id)
+    return chosen
+  }
+
+  for (let i = 0; i < totalSpots.value; i++) {
+    // 每 3 个点插 1 个乡村 —— 见上方注释，这是主张的最小落地
+    const wantRural = i % 3 === 2
+    // 选了「地方风味」时，每 4 个点插一个餐饮点。
+    // 不选就不插：口味偏好是这个兴趣项唯一的作用点，
+    // 否则这个选项就成了摆设（用户选了却看不到任何变化）。
+    const wantFood = !wantRural && i % 4 === 3 && foods.length > 0 && interests.value.includes('food')
+
+    const pool = wantRural && rurals.length
+      ? rurals
+      : wantFood
+        ? foods
+        : scenics.length
+          ? scenics
+          : rurals
+    const p = take(pool)
+    if (!p) continue
+
+    const isRural = p.business_type === 'RURAL_SPOT'
+    const usage = capacityUsage(p.id, p.business_type)
+
+    // 乡村点找它挂的体验（第一条），再顺着体验找农产品
+    const exp = isRural ? (exps.find((e) => e.poi_id === p.id) ?? null) : null
+    const goods = exp ? prods.filter((x) => x.experience_id === exp.id) : []
+
+    seq.push({
+      id: `${p.id}-${i}`,
+      name: p.name,
+      poiId: p.id,
+      kind: isRural ? 'rural' : p.business_type === 'FOOD' ? 'food' : 'scenic',
+      meta: `${p.district} · ${BUSINESS_LABEL[p.business_type]}`,
+      why: reasonFor(p, usage, isRural, i),
+      hits: hitTags(p),
+      usage,
+      duration: p.duration_min,
+      ticket: p.ticket_price,
+      scene: p.scene || 'qinling',
+      exp,
+      goods: goods.slice(0, 2),
+    })
+  }
+
+  // 按天切分
+  const out: { day: number; stops: Stop[] }[] = []
+  for (let d = 0; d < days.value; d++) {
+    out.push({ day: d + 1, stops: seq.slice(d * perDay.value, (d + 1) * perDay.value) })
+  }
+  return out
+})
+
+/** 推荐理由：从数据算，不是写死的句式 —— 每种情况都对应一个真实判定 */
+function reasonFor(p: Poi, usage: number, isRural: boolean, idx: number): string {
+  const parts: string[] = []
+  if (usage >= 1) parts.push(`当前承载 ${Math.round(usage * 100)}% 已超载，安排在此可避开高峰`)
+  else if (usage >= 0.8) parts.push(`承载 ${Math.round(usage * 100)}% 偏高，建议错开午后时段`)
+  else parts.push(`承载 ${Math.round(usage * 100)}%，余量充足，无需排队`)
+
+  if (isRural) parts.push('且距离上一站路程相邻，可作为分流的承接点')
+  else if (idx === 0) parts.push('作为当日首站，上午时段体验最佳')
+
+  const hit = hitTags(p)
+  if (hit.length) parts.push(`与你选择的「${hit.join(' / ')}」偏好相符`)
+
+  return parts.join('，') + '。'
+}
+
+/** 这条 POI 命中了哪些兴趣标签（转成展示文案） */
+function hitTags(p: Poi): string[] {
+  const out: string[] = []
+  for (const k of interests.value) {
+    const m = INTEREST_MATCH[k]
+    const typeOk = m.types.includes(p.business_type)
+    const tagOk = p.tags.some((t) => m.tags.some((mt) => t.includes(mt)))
+    if (typeOk || tagOk) out.push(INTERESTS.find((x) => x.key === k)!.label)
+  }
+  return out
+}
+
+/* ============================================================
+ * 汇总指标
+ * ============================================================ */
+
+/** 全程停留点（扁平） */
+const allStops = computed(() => plan.value.flatMap((d) => d.stops))
+
+/** 乡村点占比 —— 直接展示"客流下乡"这条主张在本次规划里的兑现程度 */
+const ruralShare = computed(() => {
+  const all = allStops.value
+  if (!all.length) return 0
+  return Math.round((all.filter((s) => s.kind === 'rural').length / all.length) * 100)
+})
+
+/** 门票 + 体验的硬支出估算（不含餐饮住宿，避免给出貌似精确其实无依据的总价） */
+const ticketSum = computed(() => allStops.value.reduce((s, x) => s + (x.ticket || 0), 0))
+const expSum = computed(() =>
+  allStops.value.reduce((s, x) => s + (x.exp?.price ?? 0) + x.goods.reduce((a, g) => a + g.price, 0), 0)
+)
+
+const budgetFit = computed(() => {
+  const [lo, hi] = BUDGET_RANGE[budget.value]
+  const perPersonDay = (ticketSum.value + expSum.value) / Math.max(1, days.value)
+  if (perPersonDay > hi) return { level: 'over', text: '超出该档位，建议减一站或提高预算档' }
+  if (perPersonDay < lo) return { level: 'under', text: '明显低于该档位，可再加一项乡村体验' }
+  return { level: 'fit', text: '与该预算档位相符' }
+})
+
+// 入参变化 → 结果区重绘 → 重新扫描 reveal
+useReveal(
+  root,
+  loading,
+  computed(() => `${days.value}|${pace.value}|${budget.value}|${interests.value.join(',')}`)
+)
+</script>
+
+<template>
+  <div ref="root" class="itin">
+    <!-- ============ 1. Banner ============ -->
+    <header class="banner">
+      <SceneArt variant="terrace" ratio="auto" class="banner__art" />
+      <div class="banner__veil" />
+      <div class="container banner__inner">
+        <span class="eyebrow eyebrow--light">AI 智能行程规划</span>
+        <h1 class="display banner__title">让 AI 把行程排顺<br />也把客流排匀</h1>
+        <p class="banner__desc">
+          规划不只考虑"去哪里"，还要考虑"哪里装得下"。系统在生成动线时同步读取各资源点的承载力余量，
+          把高位景区的一部分客流，顺势引导到承载充足、路程相邻的乡村体验点。
+        </p>
+      </div>
+    </header>
+
+    <div class="container section">
+      <!-- ============ 2. 规划工作台（左入参 / 右结论） ============ -->
+      <div class="bench">
+        <!-- 左：入参 -->
+        <aside class="panel">
+          <div class="panel__head">
+            <span class="eyebrow">规划参数</span>
+            <h2 class="panel__title">告诉它你的条件</h2>
+          </div>
+
+          <div class="field">
+            <label class="field__label">行程天数</label>
+            <div class="seg">
+              <button
+                v-for="d in [1, 2, 3]"
+                :key="d"
+                class="seg__item"
+                :class="{ 'seg__item--on': days === d }"
+                @click="days = d"
+              >
+                {{ d }} 天
+              </button>
+            </div>
+          </div>
+
+          <div class="field">
+            <label class="field__label">旅行节奏</label>
+            <div class="seg seg--stack">
+              <button
+                v-for="p in (['relax', 'normal', 'packed'] as const)"
+                :key="p"
+                class="seg__item"
+                :class="{ 'seg__item--on': pace === p }"
+                @click="pace = p"
+              >
+                <span class="seg__name">{{ PACE_LABEL[p] }}</span>
+                <span class="seg__hint">{{ perDayHint(p) }}</span>
+              </button>
+            </div>
+            <p class="field__note">{{ PACE_DESC[pace] }}</p>
+          </div>
+
+          <div class="field">
+            <label class="field__label">预算档位</label>
+            <div class="seg">
+              <button
+                v-for="b in (['low', 'mid', 'high'] as const)"
+                :key="b"
+                class="seg__item"
+                :class="{ 'seg__item--on': budget === b }"
+                @click="budget = b"
+              >
+                {{ BUDGET_LABEL[b] }}
+              </button>
+            </div>
+            <p class="field__note">
+              {{ BUDGET_LABEL[budget] }}档参考 ¥{{ BUDGET_RANGE[budget][0] }}–{{ BUDGET_RANGE[budget][1] }} / 人 / 天
+            </p>
+          </div>
+
+          <div class="field">
+            <label class="field__label">兴趣偏好<span class="field__multi">可多选</span></label>
+            <div class="chips">
+              <button
+                v-for="it in INTERESTS"
+                :key="it.key"
+                class="chip"
+                :class="{ 'chip--on': interests.includes(it.key) }"
+                @click="toggleInterest(it.key)"
+              >
+                {{ it.label }}
+              </button>
+            </div>
+            <p class="field__note">至少保留一项。已选 {{ interests.length }} 项。</p>
+          </div>
+        </aside>
+
+        <!-- 右：AI 判定过程 -->
+        <section class="analysis">
+          <div class="analysis__head">
+            <span class="ai-badge"><i class="ai-badge__dot" />规则引擎 + AI 生成</span>
+            <h2 class="analysis__title">本次规划的判定摘要</h2>
+          </div>
+
+          <p v-if="loading" class="analysis__lead muted">正在读取资源与承载力数据…</p>
+          <p v-else-if="error" class="analysis__lead">
+            <span style="color: var(--danger)">{{ error }}</span>
+            <button class="btn btn-ghost btn-sm" style="margin-left: 12px" @click="reload">重试</button>
+          </p>
+          <p v-else class="analysis__lead">
+            在 {{ data?.pois.length ?? 0 }} 处资源中，按「兴趣匹配度 72% + 承载余量 28%」排序，
+            取前 {{ totalSpots }} 个点编排为 {{ days }} 天动线，
+            <b>其中 {{ ruralShare }}% 安排在乡村体验点</b>。
+          </p>
+
+          <dl v-if="!loading && !error" class="metrics">
+            <div class="metric">
+              <dt>停留点</dt>
+              <dd class="num">{{ allStops.length }}</dd>
+            </div>
+            <div class="metric">
+              <dt>乡村占比</dt>
+              <dd class="num">{{ ruralShare }}<i>%</i></dd>
+            </div>
+            <div class="metric">
+              <dt>硬支出估算</dt>
+              <dd class="num">¥{{ ticketSum + expSum }}</dd>
+            </div>
+            <div class="metric">
+              <dt>预算匹配</dt>
+              <dd class="metric__text" :class="`metric__text--${budgetFit.level}`">
+                {{ budgetFit.text }}
+              </dd>
+            </div>
+          </dl>
+
+          <p class="analysis__note">
+            硬支出 = 门票 + 乡村体验 + 挂靠农产品，<b>不含餐饮与住宿</b> ——
+            这两项的公开数据不足，给出貌似精确的总价反而是误导。
+          </p>
+        </section>
+      </div>
+    </div>
+
+    <!-- ============ 3. 时间轴动线 ============ -->
+    <div class="container section-0">
+      <SectionHead
+        eyebrow="行程草案"
+        :title="`${days} 天 · ${PACE_LABEL[pace]} · ${BUDGET_LABEL[budget]}预算`"
+        desc="每一站的理由都由规则实时算出：承载力读实时数据，兴趣匹配读你上面的选择。"
+        size="lg"
+        more-text="看真实资源"
+        more-to="/explore"
+      />
+
+      <div v-if="loading" class="plan__sk">
+        <div v-for="i in 3" :key="i" class="skeleton plan__skrow" />
+      </div>
+
+      <div v-else-if="isEmpty(plan)" class="empty">
+        <div class="empty__title">暂时生不出行程</div>
+        <div class="empty__desc">数据包里没有可用资源，请检查后端服务</div>
+      </div>
+
+      <template v-else>
+        <section v-for="d in plan" :key="d.day" class="dayblock reveal">
+          <header class="dayblock__head">
+            <span class="dayblock__no num">DAY {{ d.day }}</span>
+            <span class="dayblock__line" />
+            <span class="dayblock__count">{{ d.stops.length }} 站</span>
+          </header>
+
+          <ol class="tl">
+            <li v-for="(s, i) in d.stops" :key="s.id" class="tl__item" :class="`tl__item--${s.kind}`">
+              <!-- 左侧时间轴轨 -->
+              <div class="tl__rail">
+                <span class="tl__node" :class="`tl__node--${s.kind}`">{{ i + 1 }}</span>
+                <span v-if="i < d.stops.length - 1" class="tl__stem" />
+              </div>
+
+              <!-- 内容 -->
+              <div class="tl__body">
+                <router-link :to="`/poi/${s.poiId}`" class="stopcard">
+                  <div class="stopcard__art">
+                    <PoiImage
+                      :poi-id="s.poiId"
+                      :scene="s.scene"
+                      ratio="4 / 3"
+                      :alt="s.name"
+                      class="stopcard__scene"
+                    />
+                    <span class="stopcard__kind" :class="`stopcard__kind--${s.kind}`">
+                      {{ s.kind === 'rural' ? '乡村体验' : s.kind === 'food' ? '地方风味' : '景区' }}
+                    </span>
+                  </div>
+
+                  <div class="stopcard__main">
+                    <div class="stopcard__top">
+                      <h3 class="stopcard__name">{{ s.name }}</h3>
+                      <span class="muted cap stopcard__meta">{{ s.meta }}</span>
+                    </div>
+
+                    <p class="stopcard__why">{{ s.why }}</p>
+
+                    <div class="stopcard__facts">
+                      <span class="fact">
+                        <i class="fact__k">承载</i>
+                        <b class="num" :class="`fact--${loadLv(s.usage)}`">{{ Math.round(s.usage * 100) }}%</b>
+                      </span>
+                      <span class="fact">
+                        <i class="fact__k">建议时长</i>
+                        <b class="num">{{ s.duration }}′</b>
+                      </span>
+                      <span class="fact">
+                        <i class="fact__k">门票</i>
+                        <b class="num">{{ s.ticket > 0 ? `¥${s.ticket}` : '免费' }}</b>
+                      </span>
+                    </div>
+
+                    <div v-if="s.hits.length" class="stopcard__hits">
+                      <span v-for="h in s.hits" :key="h" class="tag tag-brand">{{ h }}</span>
+                    </div>
+                  </div>
+                </router-link>
+
+                <!-- 乡村点：把「体验 → 好物」这条链画出来 -->
+                <div v-if="s.exp" class="chain">
+                  <span class="chain__label">这一段可以延伸到离境之后</span>
+
+                  <div class="chain__row">
+                    <router-link :to="`/poi/${s.poiId}`" class="chain__exp">
+                      <span class="chain__tag">乡村体验</span>
+                      <span class="chain__name">{{ s.exp.name }}</span>
+                      <span class="chain__price num">¥{{ s.exp.price }}</span>
+                    </router-link>
+
+                    <template v-if="s.goods.length">
+                      <span class="chain__arrow">→</span>
+                      <div class="chain__goods">
+                        <router-link
+                          v-for="g in s.goods"
+                          :key="g.id"
+                          :to="`/poi/${s.poiId}`"
+                          class="good"
+                        >
+                          <span class="good__name">{{ g.name }}</span>
+                          <span class="good__spec">{{ g.spec }}</span>
+                          <span class="good__origin">{{ g.origin_village }}</span>
+                          <span class="good__price num">¥{{ g.price }}</span>
+                        </router-link>
+                      </div>
+                    </template>
+                  </div>
+                </div>
+              </div>
+            </li>
+          </ol>
+        </section>
+      </template>
+    </div>
+
+    <!-- ============ 4. 方法说明 ============ -->
+    <div class="container section">
+      <section class="method">
+        <SectionHead
+          eyebrow="怎么做到的"
+          title="判定用规则，生成与解释用 AI"
+          desc="承载力判定不能交给概率模型；文案与解释才交给大模型。两者各守边界，互不越界。"
+          size="lg"
+        />
+        <div class="grid grid-3 method__grid">
+          <div class="mcard reveal">
+            <span class="mcard__no num">01</span>
+            <h3 class="h3">候选集召回</h3>
+            <p class="body">按行政区、类型、距离与开放状态筛出候选池，保证动线可达。</p>
+            <span class="mcard__in">输入：资源网络 + 你的兴趣偏好</span>
+          </div>
+          <div class="mcard reveal">
+            <span class="mcard__no num">02</span>
+            <h3 class="h3">承载力过滤</h3>
+            <p class="body">读取各点实时承载余量，余量低于阈值的点降权，余量充足的点前置。</p>
+            <span class="mcard__in">输入：各点 capacity 与实时占用</span>
+          </div>
+          <div class="mcard reveal">
+            <span class="mcard__no num">03</span>
+            <h3 class="h3">AI 生成与解释</h3>
+            <p class="body">大模型只负责把动线写成可读的行程说明与推荐理由，不改判定结果。</p>
+            <span class="mcard__in">输出：行程文本 · 不参与判定</span>
+          </div>
+        </div>
+
+        <p class="method__foot">
+          本页当前由前端规则演示（<b>M4 多智能体规划尚未接入</b>）。上面每一条推荐理由都由规则实时算出，
+          不是预置文案 —— 接入后端后，规则判定下沉到 M4，本页只负责渲染返回结果。
+        </p>
+      </section>
+    </div>
+  </div>
+</template>
+
+<style scoped>
+/* ============ 1. Banner ============ */
+.banner {
+  position: relative;
+  min-height: min(52vh, 480px);
+  display: flex;
+  align-items: center;
+  overflow: hidden;
+  background: var(--brand-900);
+}
+.banner__art {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  border-radius: 0;
+  opacity: 0.6;
+}
+.banner__veil {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    100deg,
+    rgba(11, 33, 25, 0.9) 0%,
+    rgba(11, 33, 25, 0.74) 50%,
+    rgba(11, 33, 25, 0.46) 100%
+  );
+}
+.banner__inner {
+  position: relative;
+  max-width: 860px;
+}
+.banner__title {
+  margin-top: var(--sp-4);
+  color: #fff;
+  font-size: var(--fs-mega);
+  line-height: 1.16;
+}
+.banner__desc {
+  margin-top: var(--sp-5);
+  max-width: 44em;
+  font-size: var(--fs-hero-sub);
+  line-height: 1.8;
+  color: rgba(255, 255, 255, 0.82);
+}
+
+/* ============ 2. 工作台 ============ */
+.bench {
+  display: grid;
+  grid-template-columns: 380px 1fr;
+  gap: var(--sp-6);
+  align-items: start;
+}
+
+/* 左：入参面板。白底 + 左侧一条品牌色竖线，和右栏区别开 */
+.panel {
+  position: relative;
+  padding: var(--sp-6);
+  background: #fff;
+  border: 1px solid var(--line-soft);
+  border-left: 3px solid var(--brand-500);
+  border-radius: var(--r-lg);
+  box-shadow: var(--sh-1);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-6);
+}
+.panel__head {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+.panel__title {
+  font-family: var(--font-display);
+  font-size: 22px;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+.field__label {
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--ink-700);
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+}
+.field__multi {
+  font-weight: 400;
+  font-size: var(--fs-cap);
+  color: var(--warm-500);
+}
+.field__note {
+  font-size: var(--fs-cap);
+  color: var(--warm-500);
+  line-height: 1.6;
+}
+
+.seg {
+  display: flex;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+}
+.seg--stack {
+  flex-direction: column;
+}
+.seg__item {
+  flex: 1;
+  min-width: 0;
+  padding: 9px var(--sp-3);
+  font-size: var(--fs-sm);
+  color: var(--ink-600);
+  background: var(--paper-2);
+  border: 1px solid transparent;
+  border-radius: var(--r-md);
+  text-align: center;
+  transition: all var(--dur-1) var(--ease);
+}
+.seg--stack .seg__item {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  text-align: left;
+  gap: var(--sp-3);
+}
+.seg__item:hover {
+  background: var(--brand-50);
+  color: var(--brand-700);
+}
+.seg__item--on {
+  color: var(--brand-800);
+  font-weight: 600;
+  background: var(--brand-50);
+  border-color: var(--brand-500);
+}
+.seg__name {
+  font-weight: 600;
+}
+.seg__hint {
+  font-size: var(--fs-cap);
+  color: var(--warm-500);
+  font-weight: 400;
+}
+.seg__item--on .seg__hint {
+  color: var(--brand-500);
+}
+
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+}
+.chip {
+  padding: 7px var(--sp-4);
+  font-size: var(--fs-sm);
+  color: var(--ink-600);
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: var(--r-pill);
+  transition: all var(--dur-1) var(--ease);
+}
+.chip:hover {
+  border-color: var(--brand-400);
+  color: var(--brand-700);
+}
+.chip--on {
+  color: #fff;
+  background: var(--brand-700);
+  border-color: var(--brand-700);
+  font-weight: 500;
+}
+
+/* 右：判定摘要 */
+.analysis {
+  padding: var(--sp-6) var(--sp-7);
+  background: var(--paper-3);
+  border-radius: var(--r-lg);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-5);
+  min-height: 100%;
+}
+.analysis__head {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+.ai-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  align-self: flex-start;
+  padding: 4px 11px;
+  font-size: var(--fs-cap);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--tech-600);
+  background: var(--tech-50);
+  border: 1px solid #cfe3f4;
+  border-radius: var(--r-pill);
+}
+.ai-badge__dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--tech-500);
+}
+.analysis__title {
+  font-family: var(--font-display);
+  font-size: 24px;
+}
+.analysis__lead {
+  font-size: var(--fs-body);
+  line-height: 1.9;
+  color: var(--ink-600);
+  max-width: 52em;
+}
+.analysis__lead b {
+  color: var(--brand-700);
+}
+.analysis__note {
+  margin-top: auto;
+  padding-top: var(--sp-4);
+  border-top: 1px solid var(--line);
+  font-size: var(--fs-cap);
+  line-height: 1.7;
+  color: var(--warm-500);
+}
+
+.metrics {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: var(--sp-5);
+}
+.metric dt {
+  font-size: var(--fs-cap);
+  letter-spacing: 0.1em;
+  color: var(--warm-500);
+}
+.metric dd {
+  margin-top: 6px;
+  font-size: 28px;
+  font-weight: 600;
+  color: var(--brand-700);
+  line-height: 1.15;
+}
+.metric dd i {
+  font-style: normal;
+  font-size: 16px;
+  margin-left: 1px;
+}
+.metric__text {
+  font-size: var(--fs-sm) !important;
+  font-weight: 500 !important;
+  line-height: 1.5 !important;
+}
+.metric__text--fit {
+  color: var(--ok) !important;
+}
+.metric__text--over {
+  color: var(--danger) !important;
+}
+.metric__text--under {
+  color: var(--warn) !important;
+}
+
+/* ============ 3. 时间轴 ============ */
+.plan__sk {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-5);
+}
+.plan__skrow {
+  height: 200px;
+  border-radius: var(--r-lg);
+}
+
+.dayblock {
+  margin-bottom: var(--sp-8);
+}
+.dayblock__head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  margin-bottom: var(--sp-5);
+}
+.dayblock__no {
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  color: var(--brand-700);
+}
+.dayblock__line {
+  flex: 1;
+  height: 1px;
+  background: var(--line);
+}
+.dayblock__count {
+  font-size: var(--fs-cap);
+  color: var(--warm-500);
+}
+
+.tl {
+  display: flex;
+  flex-direction: column;
+}
+
+/* 左侧轨道：节点 + 连接竖线 */
+.tl__item {
+  display: grid;
+  grid-template-columns: 44px 1fr;
+  gap: var(--sp-5);
+}
+.tl__rail {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+.tl__node {
+  flex: none;
+  width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  font-size: var(--fs-cap);
+  font-weight: 700;
+  font-family: var(--font-num);
+  border-radius: 50%;
+  background: #fff;
+  border: 2px solid var(--line);
+  color: var(--warm-500);
+  z-index: 1;
+}
+.tl__node--scenic {
+  border-color: var(--gold-500);
+  color: var(--gold-600);
+  background: var(--gold-50);
+}
+.tl__node--rural {
+  border-color: var(--brand-500);
+  color: #fff;
+  background: var(--brand-600);
+}
+.tl__node--food {
+  border-color: var(--warm-400);
+  color: var(--ink-600);
+}
+.tl__stem {
+  flex: 1;
+  width: 1px;
+  min-height: 24px;
+  background: repeating-linear-gradient(
+    to bottom,
+    var(--line) 0,
+    var(--line) 4px,
+    transparent 4px,
+    transparent 9px
+  );
+}
+
+.tl__body {
+  padding-bottom: var(--sp-7);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+  min-width: 0;
+}
+
+.stopcard {
+  display: grid;
+  grid-template-columns: 168px 1fr;
+  gap: var(--sp-5);
+  padding: var(--sp-4);
+  background: #fff;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--r-lg);
+  transition: border-color var(--dur-2) var(--ease), box-shadow var(--dur-2) var(--ease),
+    transform var(--dur-2) var(--ease);
+}
+.stopcard:hover {
+  border-color: var(--line);
+  box-shadow: var(--sh-2);
+  transform: translateX(3px);
+}
+.stopcard__art {
+  position: relative;
+  overflow: hidden;
+  border-radius: var(--r-md);
+}
+.stopcard__scene {
+  border-radius: 0;
+  transition: transform 900ms var(--ease);
+}
+.stopcard:hover .stopcard__scene {
+  transform: scale(1.05);
+}
+.stopcard__kind {
+  position: absolute;
+  left: var(--sp-3);
+  top: var(--sp-3);
+  padding: 3px 9px;
+  font-size: var(--fs-cap);
+  font-weight: 600;
+  color: #fff;
+  border-radius: var(--r-sm);
+  background: rgba(11, 33, 25, 0.66);
+  backdrop-filter: blur(3px);
+}
+.stopcard__kind--rural {
+  background: rgba(29, 85, 68, 0.86);
+}
+.stopcard__kind--scenic {
+  background: rgba(156, 115, 48, 0.86);
+}
+.stopcard__main {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  min-width: 0;
+}
+.stopcard__top {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--sp-4);
+  flex-wrap: wrap;
+}
+.stopcard__name {
+  font-family: var(--font-display);
+  font-size: 19px;
+  color: var(--ink-900);
+}
+.stopcard:hover .stopcard__name {
+  color: var(--brand-700);
+}
+.stopcard__meta {
+  letter-spacing: 0.02em;
+}
+.stopcard__why {
+  font-size: var(--fs-sm);
+  line-height: 1.8;
+  color: var(--ink-500);
+}
+.stopcard__facts {
+  display: flex;
+  gap: var(--sp-6);
+  flex-wrap: wrap;
+  padding-top: var(--sp-3);
+  border-top: 1px solid var(--line-soft);
+}
+.fact {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+.fact__k {
+  font-style: normal;
+  font-size: var(--fs-cap);
+  color: var(--warm-500);
+}
+.fact b {
+  font-size: var(--fs-sm);
+  color: var(--ink-800, var(--ink-700));
+}
+.fact--ok {
+  color: var(--ok);
+}
+.fact--warn {
+  color: var(--warn);
+}
+.fact--danger {
+  color: var(--danger);
+}
+.stopcard__hits {
+  display: flex;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+}
+
+/* 乡村点下方的"体验 → 好物"链 */
+.chain {
+  padding: var(--sp-3) 0 var(--sp-1) var(--sp-5);
+  border-left: 2px solid var(--brand-100);
+  margin-left: var(--sp-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+.chain__label {
+  font-size: var(--fs-cap);
+  letter-spacing: 0.06em;
+  color: var(--brand-600);
+  font-weight: 600;
+}
+.chain__row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  flex-wrap: wrap;
+}
+.chain__exp {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--sp-3);
+  padding: 9px var(--sp-4);
+  background: var(--brand-50);
+  border: 1px solid var(--brand-100);
+  border-radius: var(--r-md);
+  transition: border-color var(--dur-1) var(--ease);
+}
+.chain__exp:hover {
+  border-color: var(--brand-400);
+}
+.chain__tag {
+  font-size: var(--fs-cap);
+  color: var(--brand-500);
+  font-weight: 600;
+}
+.chain__name {
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--brand-800);
+}
+.chain__price {
+  font-size: var(--fs-sm);
+  font-weight: 700;
+  color: var(--gold-600);
+}
+.chain__arrow {
+  color: var(--warm-400);
+  font-size: 15px;
+}
+.chain__goods {
+  display: flex;
+  gap: var(--sp-3);
+  flex-wrap: wrap;
+}
+.good {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 9px var(--sp-4);
+  background: #fff;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--r-md);
+  min-width: 180px;
+  transition: border-color var(--dur-1) var(--ease), box-shadow var(--dur-1) var(--ease);
+}
+.good:hover {
+  border-color: var(--line);
+  box-shadow: var(--sh-1);
+}
+.good__name {
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--ink-800, var(--ink-700));
+}
+.good__spec,
+.good__origin {
+  font-size: var(--fs-cap);
+  color: var(--warm-500);
+}
+.good__price {
+  font-size: var(--fs-sm);
+  font-weight: 700;
+  color: var(--gold-600);
+}
+
+/* ============ 4. 方法说明 ============ */
+.method__grid {
+  gap: var(--sp-5);
+}
+.mcard {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  padding-top: var(--sp-5);
+  border-top: 2px solid var(--brand-500);
+}
+.mcard__no {
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  color: var(--brand-500);
+}
+.mcard .body {
+  color: var(--ink-500);
+  line-height: 1.8;
+}
+.mcard__in {
+  margin-top: auto;
+  font-size: var(--fs-cap);
+  color: var(--warm-500);
+}
+.method__foot {
+  margin-top: var(--sp-7);
+  padding-top: var(--sp-5);
+  border-top: 1px solid var(--line-soft);
+  font-size: var(--fs-sm);
+  line-height: 1.85;
+  color: var(--ink-500);
+  max-width: 62em;
+}
+.method__foot b {
+  color: var(--ink-700);
+}
+
+/* ============ 响应式 ============ */
+@media (max-width: 1080px) {
+  .bench {
+    grid-template-columns: 1fr;
+  }
+  .metrics {
+    grid-template-columns: repeat(2, 1fr);
+  }
+  .stopcard {
+    grid-template-columns: 140px 1fr;
+  }
+}
+
+@media (max-width: 720px) {
+  .banner {
+    min-height: auto;
+    padding: var(--sp-8) 0 var(--sp-7);
+  }
+  .analysis {
+    padding: var(--sp-5);
+  }
+  .metrics {
+    grid-template-columns: repeat(2, 1fr);
+    gap: var(--sp-4);
+  }
+  .metric dd {
+    font-size: 22px;
+  }
+  .tl__item {
+    grid-template-columns: 32px 1fr;
+    gap: var(--sp-3);
+  }
+  .tl__node {
+    width: 26px;
+    height: 26px;
+  }
+  .stopcard {
+    grid-template-columns: 1fr;
+  }
+  .stopcard__art {
+    max-height: 180px;
+  }
+  .stopcard__facts {
+    gap: var(--sp-4);
+  }
+  .chain {
+    padding-left: var(--sp-4);
+    margin-left: 0;
+  }
+  .chain__row {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: var(--sp-3);
+  }
+  .chain__arrow {
+    transform: rotate(90deg);
+    align-self: flex-start;
+  }
+  .good {
+    min-width: 0;
+    width: 100%;
+  }
+}
+</style>

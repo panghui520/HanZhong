@@ -52,6 +52,20 @@ chroma.sqlite3
 data/vectorstore/
 *.chroma
 
+# ---------- 运营上传的媒体文件（M9）----------
+# 景点配图与轮播图。属于运行期数据，不进仓库：
+# 一是体积大，二是每人本地各有一份，提交上来只会互相覆盖。
+# 目录由 MediaStorageService 在启动时自动创建，不需要 .gitkeep 占位。
+#
+# ⚠️ 必须写成 /media/（前导斜杠 = 只匹配仓库根目录），不能写 media/。
+# gitignore 的 `media/` 会匹配**任意层级**叫 media 的目录，
+# 于是把 Java 包 com/hanyou/brain/media/（MediaService、
+# MediaStorageService）一起吞掉 —— 提交时悄无声息地漏掉两个核心类，
+# 换台机器 clone 下来直接编译不过。已实测踩过：
+#   git check-ignore -v .../brain/media/MediaService.java
+#   -> .gitignore:59:media/  .../brain/media/MediaService.java
+/media/
+
 # ---------- 密钥与本地配置（绝不入库）----------
 .env
 .env.*

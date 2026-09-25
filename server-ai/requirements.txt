@@ -1,0 +1,35 @@
+# ============================================================
+# 汉游智脑 AI 服务依赖
+#
+# 安装（建议用独立虚拟环境，不要装进系统 Python）：
+#     python -m venv .venv
+#     .venv/Scripts/python.exe -m pip install -r server-ai/requirements.txt
+#
+# 版本按开发环境实测锁定。**不需要 PyTorch**：
+# 默认向量化实现是字符 n-gram 哈希（见 app/embed.py），只用标准库 + numpy。
+# chromadb 会被一起装上，但它的默认 embedding 函数（ONNX MiniLM）不会被调用
+# ——我们传 embedding_function=None，向量自己算好再传进去，所以运行期不联网。
+# ============================================================
+
+# ---- Web 框架 ----
+fastapi==0.141.1
+uvicorn[standard]==0.53.0
+starlette==1.7.0
+
+# ---- 向量库 ----
+chromadb==1.5.9
+
+# ---- 数值计算（离线向量化用）----
+numpy==2.5.3
+
+# ---- 中文分词 ----
+# 只用于「主题缺口判定」（判断问题里的实词语料里有没有），检索本身用字符 n-gram。
+# 纯 Python 包，词典随包分发，完全离线，不下载模型。
+jieba==0.42.1
+
+# ---- HTTP 客户端（调外部 LLM / embedding 接口）----
+httpx==0.28.1
+
+# ---- 配置 ----
+pydantic==2.13.5
+python-dotenv==1.2.3

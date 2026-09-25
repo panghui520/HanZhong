@@ -1,6 +1,22 @@
 <script setup lang="ts">
-import { computed } from 'vue'
-import SceneArt from '@/components/SceneArt.vue'
+/**
+ * Home —— 首页
+ *
+ * 节奏（自上而下，靠"尺寸 + 留白 + 字号层级"形成落差，而不是每区放同样大小的卡片）：
+ *   1. 超大轮播 Hero（满屏，深色压图）
+ *   2. 汉中精选目的地（大图主推 + 次级列表，左右不对称）
+ *   3. AI 智能行程规划（浅色强调带，横向流程）
+ *   4. 乡村体验（深绿整幅带，大留白）
+ *   5. 旅行足迹与乡村好物（体验锚定，不是货架）
+ *   6. 智慧文旅平台价值（三栏，收束）
+ *
+ * 数据全部来自 getCityPack()（M1 + M2 已有接口），本文件只做取数与排版，
+ * 不新增任何后端接口、不改数据库。
+ */
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import PoiImage from '@/components/PoiImage.vue'
+import HeroCarousel from '@/components/HeroCarousel.vue'
+import SectionHead from '@/components/SectionHead.vue'
 import { getCityPack } from '@/api/citypack'
 import { isEmpty, useAsync } from '@/composables/useAsync'
 import type { Product } from '@/types'
@@ -14,7 +30,10 @@ const rurals = computed(() =>
 const products = computed(() => data.value?.products ?? [])
 const experiences = computed(() => data.value?.experiences ?? [])
 
-const hotScenic = computed(() => scenics.value.slice(0, 4))
+/** 精选目的地：首条做大幅主推，其余做次级列表 */
+const featureScenic = computed(() => scenics.value[0])
+const restScenic = computed(() => scenics.value.slice(1, 4))
+
 const ruralFeature = computed(() => rurals.value.slice(0, 3))
 
 /**
@@ -43,101 +62,107 @@ const stats = computed(() => [
   { label: '乡村特色产品', value: products.value.length, unit: '款' },
 ])
 
+/** AI 行程规划的四步：规则判定 + LLM 生成，讲清边界 */
+const flow = [
+  { no: '01', title: '理解需求', desc: '天数、同行人群、步行意愿、兴趣偏好' },
+  { no: '02', title: '召回候选', desc: '按行政区、类型、距离筛出可达资源池' },
+  { no: '03', title: '承载过滤', desc: '读取实时余量，高位点降权、闲时点前置' },
+  { no: '04', title: '生成行程', desc: 'LLM 只负责写成可读方案与推荐理由' },
+]
+
+/** 平台价值三栏 */
 const pillars = [
   {
     no: '01',
-    title: 'AI 智能行程规划',
-    desc: '把天数、预算、同行人群、步行意愿与兴趣一起交给多智能体，景区、餐饮、住宿、交通与乡村资源协同求解，输出可直接执行的逐日方案。',
+    title: '承载失衡，靠分流而不是靠限流',
+    desc: '景区高位时不是简单劝返，而是把客流导向车程相邻、承载充足的乡村点，让溢出需求有去处、乡村有客源。',
   },
   {
     no: '02',
-    title: '承载力驱动的乡村引流',
-    desc: '当热点景区承载吃紧而周边乡村闲置时，系统识别失衡、生成分流工单，并在游客行程中给出乡村替代方案——把溢出需求导向乡村。',
+    title: '乡村体验，是可锚定的消费入口',
+    desc: '每一样乡村好物都挂在一次真实体验或一个产地上，不做孤立货架，让"买"这件事有记忆背书。',
   },
   {
     no: '03',
-    title: '离境复购的消费链延伸',
-    desc: '乡村体验沉淀为旅行足迹，产品与体验锚定。游客回到自己的城市后，仍可循着记忆复购，让一次到访持续产生乡村收入。',
+    title: '一次到访，延伸成持续消费链',
+    desc: '旅行足迹沉淀为长期客源。游客离境之后仍可循着体验复购，乡村收入不再随花期与旺季起落。',
   },
 ]
+
+/* ---------- 滚动进入视口淡入（只用 IntersectionObserver，不引第三方库） ----------
+   注意两件事：
+   1. 阈值不能用固定比例。首页有大区块（如 dest__grid 高 500px），
+      在 1050 高的视口里即使完全可见也未必达到某个交叉比，会让整块永停在 opacity:0。
+      改成"元素进入视口即可触发"，用负的 rootMargin 控制延迟。
+   2. 大多数 .reveal 元素在 loading === true 时还不存在（在 v-else 分支里），
+      所以必须在数据到达、DOM 更新之后再挂 observer。这里用 watch + nextTick。 */
+let io: IntersectionObserver | undefined
+const root = ref<HTMLElement | null>(null)
+
+function observeReveals() {
+  io?.disconnect()
+  const els = root.value?.querySelectorAll<HTMLElement>('.reveal:not(.is-in)')
+  if (!els || !els.length) return
+
+  if (typeof IntersectionObserver === 'undefined') {
+    els.forEach((el) => el.classList.add('is-in'))
+    return
+  }
+
+  const vh = window.innerHeight
+  io = new IntersectionObserver(
+    (entries) => {
+      entries.forEach((e) => {
+        if (e.isIntersecting) {
+          e.target.classList.add('is-in')
+          io?.unobserve(e.target)
+        }
+      })
+    },
+    { threshold: 0, rootMargin: `0px 0px -${Math.max(60, Math.round(vh * 0.1))}px 0px` }
+  )
+  els.forEach((el) => io!.observe(el))
+
+  // 兜底：已经在视口内的元素直接点亮（observer 首次回调有延迟，
+  // 且元素若比视口还高，交叉判定可能不符合预期）
+  requestAnimationFrame(() => {
+    els.forEach((el) => {
+      const r = el.getBoundingClientRect()
+      if (r.top < window.innerHeight && r.bottom > 0) el.classList.add('is-in')
+    })
+  })
+}
+
+// loading 结束后渲染出真实区块，此时才有关注对象
+watch(loading, (v) => {
+  if (!v) nextTick(observeReveals)
+})
+onMounted(() => nextTick(observeReveals))
+onUnmounted(() => io?.disconnect())
 </script>
 
 <template>
-  <div class="home">
-    <!-- ============ Hero ============ -->
-    <section class="hero">
-      <SceneArt variant="qinling" ratio="auto" class="hero__art" />
-      <div class="hero__veil" />
-      <div class="container hero__inner">
-        <span class="eyebrow hero__eyebrow">智慧文旅 · 乡村振兴</span>
-        <h1 class="display hero__title">
-          汉游智脑
-          <span class="hero__title-sub">把一次到访，变成一条持续的乡村消费链</span>
-        </h1>
-        <p class="hero__desc">
-          面向文旅管理者与游客的一体化平台：以 RAG
-          知识库与多智能体协同，打通景区、餐饮、住宿、交通与乡村业态，
-          在承载力失衡时把客流引向乡村，并让乡村体验沉淀为可复购的长期客源。
-        </p>
-        <div class="hero__actions">
-          <router-link to="/explore" class="btn btn-gold btn-lg">探索汉中</router-link>
-          <router-link to="/admin/dashboard" class="btn btn-ghost btn-lg hero__btn-light">
-            查看管理驾驶舱
-          </router-link>
-        </div>
-      </div>
+  <div ref="root" class="home">
+    <!-- ============ 1. 超大轮播 Hero ============ -->
+    <HeroCarousel />
 
-      <div class="container hero__stats-wrap">
-        <div class="hero__stats">
-          <template v-if="loading">
-            <div v-for="i in 3" :key="i" class="skeleton" style="height: 46px" />
-          </template>
-          <template v-else>
-            <div v-for="s in stats" :key="s.label" class="hero__stat">
-              <span class="num hero__stat-num">{{ s.value }}</span>
-              <span class="hero__stat-unit">{{ s.unit }}</span>
-              <span class="hero__stat-label">{{ s.label }}</span>
-            </div>
-          </template>
-        </div>
-      </div>
-    </section>
-
-    <!-- ============ 平台主张 ============ -->
-    <section class="section-lg">
+    <!-- ============ 2. 汉中精选目的地 ============ -->
+    <section class="section-xl dest">
       <div class="container">
-        <div class="pillars__head">
-          <span class="eyebrow">平台主张</span>
-          <h2 class="h1 pillars__title">文旅的价值，不该在游客离境那一刻归零</h2>
-          <p class="body pillars__desc">
-            传统智慧文旅止步于"游客—景区—离场"。汉游智脑把链条向后延伸：乡村体验成为锚点，
-            特色产品成为可带走、可复购的延续，运营数据再回流到资源匹配。
-          </p>
-        </div>
+        <SectionHead
+          eyebrow="汉中精选目的地"
+          title="山、水、关、城，都在一条动线上"
+          desc="从秦岭深处的云海，到汉江两岸的古镇与栈道。资源按距离与承载余量编排，不是一张清单。"
+          size="xl"
+          more-text="查看全部资源"
+          more-to="/explore"
+        />
 
-        <div class="pillars">
-          <article v-for="p in pillars" :key="p.no" class="pillar">
-            <span class="num pillar__no">{{ p.no }}</span>
-            <h3 class="h3 pillar__title">{{ p.title }}</h3>
-            <p class="body pillar__desc">{{ p.desc }}</p>
-          </article>
-        </div>
-      </div>
-    </section>
-
-    <!-- ============ 热门景区 ============ -->
-    <section class="section scene-band">
-      <div class="container">
-        <div class="row-between band__head">
-          <div>
-            <span class="eyebrow">核心景区</span>
-            <h2 class="h2 band__title">从栈道到古镇，汉中的骨架</h2>
+        <div v-if="loading" class="dest__sk">
+          <div class="skeleton dest__sk-main" />
+          <div class="dest__sk-side">
+            <div v-for="i in 3" :key="i" class="skeleton dest__sk-row" />
           </div>
-          <router-link to="/explore" class="band__more">查看全部资源 →</router-link>
-        </div>
-
-        <div v-if="loading" class="grid grid-4">
-          <div v-for="i in 4" :key="i" class="skeleton" style="height: 300px; border-radius: 10px" />
         </div>
 
         <div v-else-if="error" class="state-error">
@@ -145,284 +170,783 @@ const pillars = [
           <button class="btn btn-ghost btn-sm" @click="reload">重新加载</button>
         </div>
 
-        <div v-else-if="isEmpty(hotScenic)" class="empty">
+        <div v-else-if="isEmpty(featureScenic)" class="empty">
           <div class="empty__title">暂无景区数据</div>
           <div class="empty__desc">请确认后端服务已启动，且城市数据包已导入</div>
         </div>
 
-        <div v-else class="grid grid-4">
-          <router-link
-            v-for="p in hotScenic"
-            :key="p.id"
-            :to="`/poi/${p.id}`"
-            class="pcard card card-hover"
-          >
-            <SceneArt :variant="(p.scene as any) || 'qinling'" ratio="4 / 3" class="pcard__art" />
-            <div class="pcard__body">
-              <div class="row pcard__meta">
-                <span class="tag tag-brand">{{ p.district }}</span>
-                <span v-if="p.level" class="tag">{{ p.level }}</span>
-              </div>
-              <h3 class="h3 pcard__title">{{ p.name }}</h3>
-              <p class="pcard__summary">{{ p.summary }}</p>
-              <div class="pcard__foot">
-                <span class="num pcard__price">
-                  {{ p.ticket_price > 0 ? `¥${p.ticket_price}` : '免费' }}
+        <div v-else class="dest__grid reveal">
+          <!-- 主推：大幅 -->
+          <router-link :to="`/poi/${featureScenic!.id}`" class="feat">
+            <PoiImage
+              :poi-id="featureScenic!.id"
+              :scene="featureScenic!.scene"
+              ratio="auto"
+              eager
+              :alt="featureScenic!.name"
+              class="feat__art"
+            />
+            <div class="feat__veil" />
+            <div class="feat__body">
+              <div class="feat__meta">
+                <span class="tag tag-gold">{{ featureScenic!.district }}</span>
+                <span v-if="featureScenic!.level" class="feat__level">
+                  {{ featureScenic!.level }}
                 </span>
-                <span class="muted small">建议 {{ p.duration_min }} 分钟</span>
+              </div>
+              <h3 class="display feat__title">{{ featureScenic!.name }}</h3>
+              <p class="feat__summary">{{ featureScenic!.summary }}</p>
+              <div class="feat__foot">
+                <span class="num feat__price">
+                  {{ featureScenic!.ticket_price > 0 ? `¥${featureScenic!.ticket_price}` : '免费开放' }}
+                </span>
+                <span class="feat__dur">建议停留 {{ featureScenic!.duration_min }} 分钟</span>
               </div>
             </div>
           </router-link>
+
+          <!-- 次级：紧凑列表 -->
+          <div class="dest__side">
+            <router-link
+              v-for="p in restScenic"
+              :key="p.id"
+              :to="`/poi/${p.id}`"
+              class="scard"
+            >
+              <PoiImage
+                :poi-id="p.id"
+                :scene="p.scene"
+                ratio="4 / 3"
+                :alt="p.name"
+                class="scard__art"
+              />
+              <div class="scard__body">
+                <div class="scard__top">
+                  <h4 class="scard__name">{{ p.name }}</h4>
+                  <span class="scard__arrow">→</span>
+                </div>
+                <p class="scard__summary">{{ p.summary }}</p>
+                <div class="scard__meta">
+                  <span class="tag tag-brand">{{ p.district }}</span>
+                  <span class="num scard__price">
+                    {{ p.ticket_price > 0 ? `¥${p.ticket_price}` : '免费' }}
+                  </span>
+                </div>
+              </div>
+            </router-link>
+          </div>
+        </div>
+
+        <!-- 数据概览：压在区块底部，细线分隔，不做卡片堆 -->
+        <div v-if="!loading && !error" class="stats reveal">
+          <div v-for="s in stats" :key="s.label" class="stat">
+            <span class="num stat__num">{{ s.value }}</span>
+            <span class="stat__unit">{{ s.unit }}</span>
+            <span class="stat__label">{{ s.label }}</span>
+          </div>
         </div>
       </div>
     </section>
 
-    <!-- ============ 乡村旅游 ============ -->
-    <section class="section-lg rural-band">
+    <!-- ============ 3. AI 智能行程规划 ============ -->
+    <section class="section-xl ai-band">
       <div class="container">
-        <div class="rural__head">
-          <span class="eyebrow eyebrow--light">乡村振兴</span>
-          <h2 class="h1 rural__title">把溢出的客流，送进秦岭深处的村子</h2>
-          <p class="body rural__desc">
-            当核心景区承载吃紧，系统会匹配车程 30–60
-            分钟内的乡村点，用一次真实的乡村体验承接需求——茶园、稻田、橘园、非遗工坊。
-          </p>
+        <div class="ai__grid">
+          <div class="ai__copy reveal">
+            <span class="eyebrow">AI 智能行程规划</span>
+            <h2 class="h1 ai__title">规划不只考虑"去哪里"，<br />还要考虑"哪里装得下"</h2>
+            <p class="lead ai__desc">
+              系统在生成动线时同步读取各资源点的承载余量，把高位景区的一部分客流，
+              顺势引导到承载充足、路程相邻的乡村体验点。判定用规则，生成与解释用大模型，两者各守边界。
+            </p>
+            <div class="ai__cta">
+              <router-link to="/itinerary" class="btn btn-primary btn-lg">生成我的行程</router-link>
+              <router-link to="/assistant" class="btn btn-ghost btn-lg">问智脑几个问题</router-link>
+            </div>
+          </div>
+
+          <ol class="ai__flow reveal">
+            <li v-for="f in flow" :key="f.no" class="flowitem">
+              <span class="num flowitem__no">{{ f.no }}</span>
+              <div class="flowitem__main">
+                <span class="flowitem__title">{{ f.title }}</span>
+                <span class="flowitem__desc">{{ f.desc }}</span>
+              </div>
+            </li>
+          </ol>
         </div>
+      </div>
+    </section>
+
+    <!-- ============ 4. 乡村体验（深绿整幅带） ============ -->
+    <section class="section-xl rural-band">
+      <div class="container">
+        <SectionHead
+          eyebrow="乡村振兴 · 乡村体验"
+          title="把溢出的客流，送进秦岭深处的村子"
+          desc="当核心景区承载吃紧，系统会匹配车程 30–60 分钟内的乡村点，用一次真实的乡村体验承接需求——茶园、稻田、橘园、非遗工坊。"
+          size="xl"
+          tone="light"
+          more-text="去看乡村体验"
+          more-to="/explore"
+        />
 
         <div v-if="loading" class="grid grid-3">
-          <div v-for="i in 3" :key="i" class="skeleton" style="height: 220px; border-radius: 10px" />
+          <div v-for="i in 3" :key="i" class="skeleton" style="height: 300px; border-radius: 10px" />
         </div>
 
-        <div v-else class="grid grid-3">
+        <div v-else class="rural__grid">
           <router-link
-            v-for="p in ruralFeature"
+            v-for="(p, i) in ruralFeature"
             :key="p.id"
             :to="`/poi/${p.id}`"
-            class="rcard card card-hover"
+            class="rcard reveal"
+            :class="{ 'rcard--lead': i === 0 }"
           >
-            <SceneArt :variant="(p.scene as any) || 'terrace'" ratio="16 / 10" class="rcard__art" />
+            <PoiImage
+              :poi-id="p.id"
+              :scene="p.scene"
+              ratio="auto"
+              :alt="p.name"
+              class="rcard__art"
+            />
+            <div class="rcard__veil" />
             <div class="rcard__body">
               <span class="tag tag-gold">{{ p.district }}</span>
-              <h3 class="h3 rcard__title">{{ p.name }}</h3>
+              <h3 class="rcard__title">{{ p.name }}</h3>
               <p class="rcard__summary">{{ p.summary }}</p>
             </div>
           </router-link>
         </div>
+
+        <p class="rural__note reveal">
+          乡村体验点不计入"热门榜"，而是按承载余量与路程相邻度匹配——这是分流的落点。
+        </p>
       </div>
     </section>
 
-    <!-- ============ 乡村好物（体验溯源） ============ -->
-    <section class="section">
+    <!-- ============ 5. 旅行足迹与乡村好物 ============ -->
+    <section class="section-xl goods">
       <div class="container">
-        <div class="row-between band__head">
-          <div>
-            <span class="eyebrow">乡村好物</span>
-            <h2 class="h2 band__title">每一样，都来自你体验过的那片山</h2>
-          </div>
-          <span class="muted small">产品与乡村体验锚定，不是货架</span>
+        <SectionHead
+          eyebrow="旅行足迹 · 乡村好物"
+          title="带回家的，是你走过的那片山"
+          desc="每一样好物都锚定在一次乡村体验或一个产地上。不是货架商品，而是可以被回忆复购的旅行余韵。"
+          size="xl"
+          more-text="了解更多"
+          more-to="/assistant"
+        />
+
+        <!-- 溯源条：把「体验 → 好物 → 复购」画出来 -->
+        <div class="trace reveal">
+          <span class="trace__step">到访汉中</span>
+          <span class="trace__line" />
+          <span class="trace__step">乡村体验</span>
+          <span class="trace__line" />
+          <span class="trace__step">带走好物</span>
+          <span class="trace__line" />
+          <span class="trace__step trace__step--end">离境复购</span>
         </div>
 
         <div v-if="loading" class="grid grid-4">
-          <div v-for="i in 4" :key="i" class="skeleton" style="height: 260px; border-radius: 10px" />
+          <div v-for="i in 4" :key="i" class="skeleton" style="height: 320px; border-radius: 10px" />
         </div>
 
-        <div v-else class="grid grid-4">
-          <article v-for="g in goods" :key="g.id" class="gcard card card-hover">
-            <SceneArt :variant="(g.scene as any) || 'terrace'" ratio="1 / 1" class="gcard__art" />
+        <div v-else class="goods__grid">
+          <article v-for="g in goods" :key="g.id" class="gcard reveal">
+            <div class="gcard__art-wrap">
+              <!-- 产品没有自己的图片，用产地乡村点的实拍图 ——
+                   "带回家的，是你走过的那片山"，这里正是要显示走过的那片山 -->
+              <PoiImage
+                :poi-id="g.poi_id"
+                :scene="g.scene"
+                ratio="4 / 3"
+                :alt="`${g.origin_village} · ${g.name}`"
+                class="gcard__art"
+              />
+            </div>
             <div class="gcard__body">
-              <span class="tag tag-brand gcard__from">来自「{{ g.experience_name || '乡村体验' }}」</span>
-              <h3 class="h3 gcard__title">{{ g.name }}</h3>
-              <p class="gcard__spec muted small">{{ g.spec }} · {{ g.origin_village }}</p>
+              <span class="gcard__from">来自「{{ g.experience_name || '乡村体验' }}」</span>
+              <h3 class="gcard__name">{{ g.name }}</h3>
+              <p class="gcard__spec">{{ g.spec }} · {{ g.origin_village }}</p>
               <p class="gcard__story">{{ g.story }}</p>
               <div class="gcard__foot">
                 <span class="num gcard__price">¥{{ g.price }}</span>
-                <span class="muted small">可复购</span>
+                <span class="gcard__repurchase">可复购</span>
               </div>
             </div>
           </article>
         </div>
+
+        <p class="goods__note muted small">
+          产品不设独立商城入口，全部挂靠体验或产地——这是刻意的设计取舍。
+        </p>
       </div>
     </section>
 
-    <!-- ============ 闭环 ============ -->
-    <section class="section-lg loop-band">
+    <!-- ============ 6. 智慧文旅平台价值 ============ -->
+    <section class="section-xl value-band">
       <div class="container">
-        <span class="eyebrow">业务闭环</span>
-        <h2 class="h2 loop__title">一次旅游，如何在系统里走完一整圈</h2>
+        <SectionHead
+          eyebrow="智慧文旅平台价值"
+          title="文旅的价值，不该在游客离境那一刻归零"
+          desc="传统智慧文旅止步于「游客—景区—离场」。汉游智脑把链条向后延伸：乡村体验成为锚点，特色产品成为可带走的延续，运营数据再回流到资源匹配。"
+          size="xl"
+          align="center"
+        />
 
-        <ol class="loop">
-          <li class="loop__item">
-            <span class="num loop__no">1</span>
-            <span class="loop__label">游客需求</span>
-          </li>
-          <li class="loop__item">
-            <span class="num loop__no">2</span>
-            <span class="loop__label">AI 行程规划</span>
-          </li>
-          <li class="loop__item">
-            <span class="num loop__no">3</span>
-            <span class="loop__label">乡村引流</span>
-          </li>
-          <li class="loop__item">
-            <span class="num loop__no">4</span>
-            <span class="loop__label">乡村体验</span>
-          </li>
-          <li class="loop__item">
-            <span class="num loop__no">5</span>
-            <span class="loop__label">产品消费</span>
-          </li>
-          <li class="loop__item">
-            <span class="num loop__no">6</span>
-            <span class="loop__label">离境复购</span>
-          </li>
-          <li class="loop__item loop__item--ai">
-            <span class="num loop__no">7</span>
-            <span class="loop__label">AI 运营分析 → 优化匹配</span>
-          </li>
-        </ol>
+        <div class="pillars">
+          <article v-for="p in pillars" :key="p.no" class="pillar reveal">
+            <span class="num pillar__no">{{ p.no }}</span>
+            <h3 class="h3 pillar__title">{{ p.title }}</h3>
+            <p class="pillar__desc">{{ p.desc }}</p>
+          </article>
+        </div>
+
+        <!-- 闭环：收束为一条细线流程 -->
+        <div class="loop reveal">
+          <span class="loop__label">业务闭环</span>
+          <ol class="loop__list">
+            <li v-for="(t, i) in ['游客需求', 'AI 规划', '乡村引流', '乡村体验', '产品消费', '离境复购']" :key="t" class="loop__item">
+              <span class="num loop__no">{{ i + 1 }}</span>
+              <span class="loop__text">{{ t }}</span>
+            </li>
+            <li class="loop__item loop__item--ai">
+              <span class="num loop__no">7</span>
+              <span class="loop__text">AI 运营归因 → 优化匹配</span>
+            </li>
+          </ol>
+        </div>
+
+        <div class="value__cta">
+          <router-link to="/login" class="btn btn-primary btn-lg">登录 / 注册</router-link>
+          <router-link to="/login?role=admin" class="btn btn-ghost btn-lg">运营管理入口</router-link>
+        </div>
       </div>
     </section>
   </div>
 </template>
 
 <style scoped>
-/* ---------- Hero ---------- */
-.hero {
-  position: relative;
-  padding-bottom: var(--sp-9);
+/* ============================================================
+   2. 汉中精选目的地 —— 左大右小，刻意不对称
+   ============================================================ */
+.dest {
+  background: var(--paper);
 }
-.hero__art {
-  position: absolute;
-  inset: 0;
-  aspect-ratio: auto !important;
-  height: 78%;
-  border-radius: 0;
-}
-.hero__veil {
-  position: absolute;
-  inset: 0;
-  height: 78%;
-  background: linear-gradient(
-      180deg,
-      rgba(11, 33, 25, 0.52) 0%,
-      rgba(11, 33, 25, 0.18) 38%,
-      rgba(250, 248, 243, 0.92) 92%,
-      var(--paper) 100%
-    ),
-    linear-gradient(90deg, rgba(11, 33, 25, 0.42) 0%, rgba(11, 33, 25, 0) 62%);
-}
-.hero__inner {
-  position: relative;
-  padding-top: calc(var(--sp-9) + var(--sp-5));
-  max-width: var(--container);
-}
-.hero__eyebrow {
-  color: var(--gold-300);
-}
-.hero__eyebrow::before {
-  background: var(--gold-300);
-}
-.hero__title {
-  margin-top: var(--sp-4);
-  color: #fff;
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-3);
-}
-.hero__title-sub {
-  font-family: var(--font-sans);
-  font-size: 19px;
-  font-weight: 400;
-  letter-spacing: 0.04em;
-  color: rgba(255, 255, 255, 0.86);
-  max-width: 30em;
-}
-.hero__desc {
-  margin-top: var(--sp-5);
-  max-width: 46em;
-  font-size: var(--fs-body);
-  line-height: 1.85;
-  color: rgba(255, 255, 255, 0.78);
-}
-.hero__actions {
-  margin-top: var(--sp-6);
-  display: flex;
-  gap: var(--sp-3);
-  flex-wrap: wrap;
-}
-.hero__btn-light {
-  color: #fff;
-  border-color: rgba(255, 255, 255, 0.45);
-}
-.hero__btn-light:hover {
-  color: #fff;
-  background: rgba(255, 255, 255, 0.12);
-  border-color: #fff;
+.dest__grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.32fr) minmax(0, 1fr);
+  gap: var(--sp-6);
 }
 
-.hero__stats-wrap {
-  position: relative;
-  margin-top: var(--sp-7);
-}
-.hero__stats {
+.dest__sk {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: var(--sp-5);
+  grid-template-columns: minmax(0, 1.32fr) minmax(0, 1fr);
+  gap: var(--sp-6);
+}
+.dest__sk-main {
+  height: 480px;
+}
+.dest__sk-side {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+}
+.dest__sk-row {
+  flex: 1;
+}
+
+/* 主推大图 */
+.feat {
+  position: relative;
+  overflow: hidden;
+  border-radius: var(--r-lg);
+  min-height: 480px;
+  display: flex;
+  align-items: flex-end;
+  box-shadow: var(--sh-2);
+}
+.feat__art {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  border-radius: 0;
+  transition: transform 900ms var(--ease);
+}
+.feat:hover .feat__art {
+  transform: scale(1.03);
+}
+.feat__veil {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    180deg,
+    rgba(11, 33, 25, 0.12) 0%,
+    rgba(11, 33, 25, 0.24) 46%,
+    rgba(11, 33, 25, 0.86) 100%
+  );
+  transition: opacity var(--dur-2) var(--ease);
+}
+.feat__body {
+  position: relative;
+  padding: var(--sp-7);
+  color: #fff;
+  width: 100%;
+}
+.feat__meta {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+}
+.feat__level {
+  font-size: var(--fs-xs);
+  letter-spacing: 0.06em;
+  color: var(--gold-300);
+}
+.feat__title {
+  margin-top: var(--sp-4);
+  font-size: 34px;
+  color: #fff;
+}
+.feat__summary {
+  margin-top: var(--sp-4);
+  max-width: 40em;
+  font-size: var(--fs-sm);
+  line-height: 1.85;
+  color: rgba(255, 255, 255, 0.8);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.feat__foot {
+  margin-top: var(--sp-5);
+  padding-top: var(--sp-4);
+  border-top: 1px solid rgba(255, 255, 255, 0.22);
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-4);
+}
+.feat__price {
+  font-size: 22px;
+  font-weight: 600;
+  color: var(--gold-300);
+}
+.feat__dur {
+  font-size: var(--fs-xs);
+  color: rgba(255, 255, 255, 0.66);
+}
+
+/* 次级列表 */
+.dest__side {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+}
+.scard {
+  flex: 1;
+  display: grid;
+  grid-template-columns: 132px minmax(0, 1fr);
+  gap: 0;
   background: #fff;
   border: 1px solid var(--line-soft);
   border-radius: var(--r-lg);
-  box-shadow: var(--sh-3);
-  padding: var(--sp-5) var(--sp-6);
+  overflow: hidden;
+  transition: box-shadow var(--dur-2) var(--ease), border-color var(--dur-2) var(--ease),
+    transform var(--dur-2) var(--ease);
 }
-.hero__stat {
+.scard:hover {
+  box-shadow: var(--sh-2);
+  border-color: var(--line);
+  transform: translateX(3px);
+}
+.scard__art {
+  height: 100%;
+  border-radius: 0;
+}
+.scard__body {
+  padding: var(--sp-4) var(--sp-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+.scard__top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+}
+.scard__name {
+  font-size: 17px;
+  font-weight: 600;
+  color: var(--ink-900);
+  transition: color var(--dur-1) var(--ease);
+}
+.scard:hover .scard__name {
+  color: var(--brand-700);
+}
+.scard__arrow {
+  color: var(--gold-500);
+  flex: none;
+  transition: transform var(--dur-2) var(--ease);
+}
+.scard:hover .scard__arrow {
+  transform: translateX(4px);
+}
+.scard__summary {
+  font-size: var(--fs-xs);
+  line-height: 1.7;
+  color: var(--ink-500);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.scard__meta {
+  margin-top: auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+}
+.scard__price {
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--gold-600);
+}
+
+/* 概览数字：细线分隔，不套卡片 */
+.stats {
+  margin-top: var(--sp-8);
+  padding-top: var(--sp-6);
+  border-top: 1px solid var(--line);
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--sp-6);
+}
+.stat {
   display: flex;
   align-items: baseline;
   gap: 6px;
   flex-wrap: wrap;
 }
-.hero__stat + .hero__stat {
+.stat + .stat {
   border-left: 1px solid var(--line-soft);
-  padding-left: var(--sp-5);
+  padding-left: var(--sp-6);
 }
-.hero__stat-num {
-  font-size: 34px;
-  font-weight: 700;
+.stat__num {
+  font-size: 38px;
+  font-weight: 600;
   color: var(--brand-700);
   line-height: 1;
 }
-.hero__stat-unit {
+.stat__unit {
   font-size: var(--fs-sm);
   color: var(--warm-500);
 }
-.hero__stat-label {
+.stat__label {
   flex-basis: 100%;
   font-size: var(--fs-sm);
   color: var(--ink-500);
-  margin-top: 2px;
+  margin-top: var(--sp-1);
 }
 
-/* ---------- 平台主张 ---------- */
-.pillars__head {
-  max-width: 720px;
+/* ============================================================
+   3. AI 智能行程规划
+   ============================================================ */
+.ai-band {
+  background: var(--paper-2);
+  border-top: 1px solid var(--line-soft);
+  border-bottom: 1px solid var(--line-soft);
 }
-.pillars__title {
+.ai__grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.05fr) minmax(0, 0.95fr);
+  gap: var(--sp-9);
+  align-items: center;
+}
+.ai__title {
+  margin-top: var(--sp-5);
+  color: var(--ink-900);
+}
+.ai__desc {
+  margin-top: var(--sp-5);
+  max-width: 34em;
+}
+.ai__cta {
+  margin-top: var(--sp-7);
+  display: flex;
+  gap: var(--sp-3);
+  flex-wrap: wrap;
+}
+
+.ai__flow {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  border-top: 1px solid var(--line);
+}
+.flowitem {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-5);
+  padding: var(--sp-5) 0;
+  border-bottom: 1px solid var(--line);
+  transition: background var(--dur-2) var(--ease);
+}
+.flowitem:hover {
+  background: rgba(255, 255, 255, 0.6);
+}
+.flowitem__no {
+  flex: none;
+  width: 34px;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  color: var(--gold-600);
+  padding-top: 3px;
+}
+.flowitem__main {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+.flowitem__title {
+  font-size: var(--fs-body);
+  font-weight: 600;
+  color: var(--ink-900);
+}
+.flowitem__desc {
+  font-size: var(--fs-xs);
+  line-height: 1.7;
+  color: var(--ink-500);
+}
+
+/* ============================================================
+   4. 乡村体验（深绿整幅带）
+   ============================================================ */
+.rural-band {
+  background: var(--brand-800);
+  color: var(--brand-100);
+}
+.rural__grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--sp-5);
+}
+.rcard {
+  position: relative;
+  overflow: hidden;
+  border-radius: var(--r-lg);
+  min-height: 340px;
+  display: flex;
+  align-items: flex-end;
+  border: 1px solid rgba(219, 233, 227, 0.14);
+  transition: border-color var(--dur-2) var(--ease), transform var(--dur-2) var(--ease);
+}
+.rcard--lead {
+  grid-row: span 1;
+  min-height: 400px;
+}
+.rcard:hover {
+  border-color: rgba(226, 202, 145, 0.5);
+  transform: translateY(-3px);
+}
+.rcard__art {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  border-radius: 0;
+  transition: transform 900ms var(--ease);
+}
+.rcard:hover .rcard__art {
+  transform: scale(1.04);
+}
+.rcard__veil {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    180deg,
+    rgba(11, 33, 25, 0.16) 0%,
+    rgba(11, 33, 25, 0.42) 50%,
+    rgba(11, 33, 25, 0.9) 100%
+  );
+}
+.rcard__body {
+  position: relative;
+  padding: var(--sp-6);
+  color: #fff;
+  width: 100%;
+}
+.rcard__title {
   margin-top: var(--sp-3);
+  font-family: var(--font-display);
+  font-size: 21px;
+  font-weight: 600;
+  color: #fff;
 }
-.pillars__desc {
-  margin-top: var(--sp-4);
+.rcard--lead .rcard__title {
+  font-size: 26px;
+}
+.rcard__summary {
+  margin-top: var(--sp-3);
+  font-size: var(--fs-sm);
+  line-height: 1.75;
+  color: rgba(255, 255, 255, 0.76);
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.rural__note {
+  margin-top: var(--sp-6);
+  padding-top: var(--sp-5);
+  border-top: 1px solid rgba(219, 233, 227, 0.14);
+  font-size: var(--fs-sm);
+  color: var(--brand-300);
+}
+
+/* ============================================================
+   5. 旅行足迹与乡村好物
+   ============================================================ */
+.goods {
+  background: var(--paper);
+}
+
+/* 溯源条 */
+.trace {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  flex-wrap: wrap;
+  padding: var(--sp-5) var(--sp-6);
+  background: var(--paper-2);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--r-lg);
+  margin-bottom: var(--sp-6);
+}
+.trace__step {
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--brand-700);
+  letter-spacing: 0.04em;
+}
+.trace__step--end {
+  color: var(--gold-600);
+}
+.trace__line {
+  flex: 1 1 32px;
+  height: 1px;
+  background: linear-gradient(90deg, var(--line), var(--gold-300));
+}
+
+.goods__grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--sp-5);
+}
+.gcard {
+  display: flex;
+  flex-direction: column;
+  background: transparent;
+  border-top: 2px solid var(--brand-600);
+  padding-top: 0;
+  transition: transform var(--dur-2) var(--ease);
+}
+.gcard:hover {
+  transform: translateY(-4px);
+}
+.gcard__art-wrap {
+  overflow: hidden;
+  border-radius: var(--r-md);
+}
+.gcard__art {
+  border-radius: 0;
+  transition: transform 900ms var(--ease);
+}
+.gcard:hover .gcard__art {
+  transform: scale(1.04);
+}
+.gcard__body {
+  padding: var(--sp-4) 0 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  flex: 1;
+}
+.gcard__from {
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  color: var(--gold-600);
+  line-height: 1.6;
+}
+.gcard__name {
+  font-family: var(--font-display);
+  font-size: 19px;
+  font-weight: 600;
+  color: var(--ink-900);
+}
+.gcard__spec {
+  font-size: var(--fs-xs);
+  color: var(--warm-500);
+}
+.gcard__story {
+  font-size: var(--fs-sm);
+  color: var(--ink-500);
+  line-height: 1.8;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.gcard__foot {
+  margin-top: auto;
+  padding-top: var(--sp-4);
+  border-top: 1px solid var(--line-soft);
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+}
+.gcard__price {
+  font-size: 19px;
+  font-weight: 600;
+  color: var(--gold-600);
+}
+.gcard__repurchase {
+  font-size: var(--fs-cap);
+  letter-spacing: 0.06em;
+  color: var(--brand-500);
+}
+.goods__note {
+  margin-top: var(--sp-6);
+  text-align: center;
+}
+
+/* ============================================================
+   6. 平台价值
+   ============================================================ */
+.value-band {
+  background: var(--paper-3);
 }
 .pillars {
-  margin-top: var(--sp-7);
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: var(--sp-7);
 }
 .pillar {
-  padding-top: var(--sp-4);
-  border-top: 1px solid var(--line);
+  padding-top: var(--sp-5);
+  border-top: 2px solid var(--brand-700);
 }
 .pillar__no {
-  display: block;
   font-size: var(--fs-cap);
   letter-spacing: 0.2em;
   color: var(--gold-600);
@@ -430,227 +954,67 @@ const pillars = [
 }
 .pillar__title {
   margin-top: var(--sp-3);
+  color: var(--ink-900);
 }
 .pillar__desc {
   margin-top: var(--sp-3);
   font-size: var(--fs-sm);
-}
-
-/* ---------- 通用标题行 ---------- */
-.band__head {
-  margin-bottom: var(--sp-6);
-}
-.band__title {
-  margin-top: var(--sp-2);
-}
-.band__more {
-  font-size: var(--fs-sm);
-  color: var(--brand-700);
-  font-weight: 600;
-  transition: gap var(--dur-1) var(--ease);
-}
-.band__more:hover {
-  color: var(--gold-600);
-}
-
-/* ---------- 景区卡 ---------- */
-.scene-band {
-  background: var(--paper);
-}
-.pcard {
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-}
-.pcard__art {
-  border-radius: 0;
-}
-.pcard__body {
-  padding: var(--sp-4) var(--sp-5) var(--sp-5);
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-2);
-  flex: 1;
-}
-.pcard__meta {
-  gap: var(--sp-2);
-}
-.pcard__title {
-  transition: color var(--dur-1) var(--ease);
-}
-.pcard:hover .pcard__title {
-  color: var(--brand-700);
-}
-.pcard__summary {
-  font-size: var(--fs-sm);
+  line-height: 1.85;
   color: var(--ink-500);
-  line-height: 1.7;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-}
-.pcard__foot {
-  margin-top: auto;
-  padding-top: var(--sp-3);
-  border-top: 1px solid var(--line-soft);
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-}
-.pcard__price {
-  font-size: 17px;
-  font-weight: 700;
-  color: var(--gold-600);
 }
 
-/* ---------- 乡村带（深绿反白） ---------- */
-.rural-band {
-  background: var(--brand-800);
-  color: var(--brand-100);
-}
-.rural__head {
-  max-width: 760px;
-  margin-bottom: var(--sp-7);
-}
-.eyebrow--light {
-  color: var(--gold-300);
-}
-.eyebrow--light::before {
-  background: var(--gold-300);
-}
-.rural__title {
-  margin-top: var(--sp-3);
-  color: #fff;
-}
-.rural__desc {
-  margin-top: var(--sp-4);
-  color: var(--brand-300);
-}
-.rcard {
-  background: rgba(255, 255, 255, 0.04);
-  border-color: rgba(219, 233, 227, 0.14);
-  overflow: hidden;
-  display: flex;
-  flex-direction: column;
-}
-.rcard:hover {
-  background: rgba(255, 255, 255, 0.07);
-  border-color: rgba(226, 202, 145, 0.4);
-}
-.rcard__body {
-  padding: var(--sp-4) var(--sp-5) var(--sp-5);
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-2);
-}
-.rcard__title {
-  color: #fff;
-}
-.rcard__summary {
-  font-size: var(--fs-sm);
-  color: var(--brand-300);
-  line-height: 1.7;
-  display: -webkit-box;
-  -webkit-line-clamp: 3;
-  line-clamp: 3;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-}
-
-/* ---------- 乡村好物 ---------- */
-.gcard {
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-}
-.gcard__art {
-  border-radius: 0;
-}
-.gcard__body {
-  padding: var(--sp-4) var(--sp-5) var(--sp-5);
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-2);
-  flex: 1;
-}
-.gcard__from {
-  align-self: flex-start;
-  height: auto;
-  padding: 3px 8px;
-  line-height: 1.5;
-  white-space: normal;
-}
-.gcard__title {
-  font-size: 16px;
-}
-.gcard__story {
-  font-size: var(--fs-sm);
-  color: var(--ink-500);
-  line-height: 1.7;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-}
-.gcard__foot {
-  margin-top: auto;
-  padding-top: var(--sp-3);
-  border-top: 1px solid var(--line-soft);
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-}
-.gcard__price {
-  font-size: 17px;
-  font-weight: 700;
-  color: var(--gold-600);
-}
-
-/* ---------- 闭环 ---------- */
-.loop-band {
-  background: var(--paper-2);
-}
-.loop__title {
-  margin-top: var(--sp-2);
-  margin-bottom: var(--sp-6);
-}
+/* 闭环细线 */
 .loop {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: stretch;
-  gap: 0;
-}
-.loop__item {
-  flex: 1 1 140px;
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-2);
-  padding: var(--sp-4) var(--sp-4) var(--sp-4) 0;
-  border-top: 2px solid var(--line);
-}
-.loop__item + .loop__item {
-  padding-left: var(--sp-4);
-}
-.loop__no {
-  font-size: var(--fs-cap);
-  font-weight: 700;
-  color: var(--warm-400);
-  letter-spacing: 0.12em;
+  margin-top: var(--sp-9);
+  padding-top: var(--sp-6);
+  border-top: 1px solid var(--line);
 }
 .loop__label {
+  font-size: var(--fs-cap);
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--warm-500);
+  font-weight: 600;
+}
+.loop__list {
+  margin-top: var(--sp-5);
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-3) var(--sp-5);
+}
+.loop__item {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  padding-right: var(--sp-5);
+  border-right: 1px solid var(--line);
+}
+.loop__item:last-child {
+  border-right: none;
+  padding-right: 0;
+}
+.loop__no {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--warm-400);
+  letter-spacing: 0.1em;
+}
+.loop__text {
   font-size: var(--fs-sm);
   font-weight: 600;
   color: var(--ink-700);
 }
-.loop__item--ai {
-  border-top-color: var(--gold-500);
-  flex: 1 1 220px;
-}
-.loop__item--ai .loop__no {
+.loop__item--ai .loop__no,
+.loop__item--ai .loop__text {
   color: var(--gold-600);
+}
+
+.value__cta {
+  margin-top: var(--sp-8);
+  display: flex;
+  gap: var(--sp-3);
+  justify-content: center;
+  flex-wrap: wrap;
 }
 
 /* ---------- 错误态 ---------- */
@@ -667,32 +1031,88 @@ const pillars = [
   gap: var(--sp-3);
 }
 
-/* ---------- 响应式 ---------- */
-@media (max-width: 1080px) {
-  .pillars {
-    grid-template-columns: minmax(0, 1fr);
-    gap: var(--sp-5);
+/* ============================================================
+   响应式
+   ============================================================ */
+@media (max-width: 1440px) {
+  .feat,
+  .dest__sk-main {
+    min-height: 440px;
+    height: 440px;
   }
 }
-@media (max-width: 720px) {
-  .hero__art,
-  .hero__veil {
-    height: 88%;
-  }
-  .hero__inner {
-    padding-top: var(--sp-8);
-  }
-  .hero__stats {
+
+@media (max-width: 1080px) {
+  .dest__grid,
+  .dest__sk {
     grid-template-columns: minmax(0, 1fr);
   }
-  .hero__stat + .hero__stat {
+  .feat,
+  .dest__sk-main {
+    min-height: 400px;
+    height: 400px;
+  }
+  .ai__grid {
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--sp-7);
+  }
+  .rural__grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .rcard--lead {
+    grid-column: span 2;
+  }
+  .goods__grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .pillars {
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--sp-6);
+  }
+}
+
+@media (max-width: 720px) {
+  .feat,
+  .dest__sk-main {
+    min-height: 340px;
+    height: 340px;
+  }
+  .feat__body {
+    padding: var(--sp-5);
+  }
+  .feat__title {
+    font-size: 26px;
+  }
+  .scard {
+    grid-template-columns: 104px minmax(0, 1fr);
+  }
+  .stats {
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--sp-4);
+  }
+  .stat + .stat {
     border-left: none;
     border-top: 1px solid var(--line-soft);
     padding-left: 0;
-    padding-top: var(--sp-3);
+    padding-top: var(--sp-4);
+  }
+  .rural__grid,
+  .goods__grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .rcard--lead {
+    grid-column: span 1;
+    min-height: 340px;
+  }
+  .trace {
+    padding: var(--sp-4);
   }
   .loop__item {
-    flex: 1 1 100%;
+    border-right: none;
+    padding-right: 0;
+  }
+  .value__cta .btn {
+    flex: 1 1 auto;
   }
 }
 </style>

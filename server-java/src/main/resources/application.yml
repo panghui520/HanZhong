@@ -9,6 +9,36 @@ server:
 spring:
   application:
     name: hanyou-brain-server
+  # ------------------------------------------------------------------
+  # 上传大小上限（M9）。Spring 默认单文件只有 1MB，不改的话
+  # 手机拍的景区照片（普遍 2~5MB）会在进入 Controller 之前就被容器拒掉。
+  #
+  # 注意必须在 spring.servlet 下，不是 server.servlet（后者没有 multipart）。
+  #
+  # 这里给 6MB，刻意比 MediaStorageService.MAX_BYTES(5MB) 略大：
+  # 5~6MB 的文件能被我们自己的校验拦下，返回 5003 的明确文案；
+  # 若这里也设成 5MB，超限请求会先被容器拒掉，前端只能收到一个
+  # 没有业务含义的报错，运营不知道该做什么。
+  # ------------------------------------------------------------------
+  servlet:
+    multipart:
+      max-file-size: 6MB
+      max-request-size: 8MB
+  # ------------------------------------------------------------------
+  # 本机私密配置（M8/M9）。文件不存在也不报错（optional:）。
+  #
+  # 为什么要有这个：Java 后端**不读**仓库根的 .env —— pom 里没有 dotenv 依赖，
+  # 也没有配置把 .env 接进来（.env 是给 server-ai 的 Python 读的）。
+  # 所以 SMTP 授权码、JWT 密钥这类东西要么设成环境变量，要么写进下面这个文件。
+  # 该文件已在 .gitignore 里（application-secret.yml），不会误提交。
+  #
+  # 用法：新建 server-java/src/main/resources/application-secret.yml，
+  # 在里面按 application.yml 的结构覆写要改的项，例如
+  #   spring.mail.host: smtp.qq.com
+  #   hanyou.auth.mail.provider: smtp
+  # ------------------------------------------------------------------
+  config:
+    import: optional:classpath:application-secret.yml
   datasource:
     driver-class-name: com.mysql.cj.jdbc.Driver
     url: jdbc:mysql://${MYSQL_HOST:127.0.0.1}:${MYSQL_PORT:3306}/${MYSQL_DB:hanyou_brain}?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&useSSL=false
@@ -18,6 +48,29 @@ spring:
     default-property-inclusion: non_null
     time-zone: Asia/Shanghai
     date-format: yyyy-MM-dd HH:mm:ss
+  # ------------------------------------------------------------------
+  # SMTP。只有 hanyou.auth.mail.provider=smtp 时才会真正用到。
+  #
+  # 刻意不给 host/username/password 填默认值：填了非空值，JavaMailSender
+  # 会在启动阶段就尝试建连，provider=demo 的环境也会被拖慢甚至启动失败。
+  # 真要用 SMTP 时，在本文件上方的 spring.config.import 指向的
+  # application-secret.yml 里补这几项（或设成环境变量）。
+  # ------------------------------------------------------------------
+  mail:
+    host: ${MAIL_HOST:}
+    port: ${MAIL_PORT:465}
+    username: ${MAIL_USERNAME:}
+    password: ${MAIL_PASSWORD:}
+    default-encoding: UTF-8
+    properties:
+      mail:
+        smtp:
+          auth: true
+          ssl:
+            enable: true
+          connectiontimeout: 5000
+          timeout: 5000
+          writetimeout: 5000
 
 mybatis-plus:
   configuration:
@@ -38,6 +91,42 @@ hanyou:
   city: ${CITY_PACK:hanzhong}
   # 启动时是否用 CityPack 覆盖导入数据库
   import-on-startup: true
+  # 媒体文件根目录（M9）。运营上传的景点配图与轮播图落在这里，
+  # 数据库里只存相对本目录的路径。与 citypack-dir 的相对方式一致，
+  # 默认即仓库根目录下的 media/。该目录被 .gitignore 忽略——上传内容不入库。
+  media-dir: ${MEDIA_DIR:../media}
+  # Python AI 服务（M3 文旅知识问答起使用）
+  ai:
+    enabled: ${AI_ENABLED:true}
+    # Python 只监听回环地址，外部流量一律经本服务代理，鉴权与限流集中在这一层
+    base-url: ${AI_BASE_URL:http://127.0.0.1:8000}
+    # 必须与 server-ai 的 INTERNAL_TOKEN 一致，两处改了要同步
+    internal-token: ${INTERNAL_TOKEN:change_me_internal_token}
+    # 建连超时给得短：Python 没起来时要立刻降级，不能让前端卡住
+    connect-timeout-seconds: 3
+    # 流式生成整体超时
+    read-timeout-seconds: 120
+  # M8 认证与权限。策略值集中在这里，答辩现场调参数不用改代码重编译
+  auth:
+    jwt:
+      # ⚠️ 生产必须换成随机长密钥。留默认值等于谁读过本仓库都能自行签发令牌。
+      # 长度必须 >= 32 字节，否则 HS256 会在启动时直接失败（见 JwtTokenProvider）
+      secret: ${JWT_SECRET:change_me_hanyou_brain_jwt_secret_at_least_32_bytes}
+      # 12 小时，够覆盖一场完整的答辩演示
+      expire-minutes: ${JWT_EXPIRE_MINUTES:720}
+      issuer: hanyou-brain
+    mail:
+      # demo = 验证码只写服务端日志，不发信（比赛现场无邮箱账号时用这个）
+      # smtp = 走 spring.mail.* 真实发送
+      provider: ${MAIL_PROVIDER:demo}
+      from: ${MAIL_FROM:汉游智脑 <no-reply@hanyou.local>}
+      subject: 【汉游智脑】邮箱验证码
+    code:
+      length: 6
+      expire-minutes: 5
+      cooldown-seconds: 60
+      max-attempts: 5
+      hash-salt: ${CODE_HASH_SALT:hanyou_brain_auth_code_salt}
 
 logging:
   level:

@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="汉游智脑">
+  <!--
+    站点图标。手写 SVG，与 SceneArt.vue 同一套配色（松柏绿 + 金）。
+    用意：原先 index.html 没有声明 favicon，浏览器会去请求 /favicon.ico 并拿到 404，
+    在控制台留下一条噪音，演示时容易被误认为"有报错"。
+    不画具体景物 —— 16px 下只剩色块，取"山 + 水"两个母题足够辨认。
+  -->
+  <rect width="64" height="64" rx="14" fill="#103026"/>
+
+  <!-- 远山 -->
+  <path d="M6 42 L20 22 L30 34 L38 24 L58 44 Z" fill="#2a6f5b"/>
+  <!-- 近山（压深一档，制造层次） -->
+  <path d="M6 46 L24 32 L38 44 L46 38 L58 46 Z" fill="#1d5544"/>
+
+  <!-- 汉江：一条金色水线，横切过山脚 -->
+  <path d="M4 48 C14 44, 22 52, 32 48 C42 44, 50 52, 60 48"
+        fill="none" stroke="#c09a4e" stroke-width="3.2" stroke-linecap="round"/>
+  <path d="M8 55 C18 51, 26 59, 36 55 C46 51, 54 59, 60 55"
+        fill="none" stroke="#9c7330" stroke-width="2" stroke-linecap="round" opacity="0.75"/>
+
+  <!-- 日轮 -->
+  <circle cx="47" cy="16" r="6" fill="#e2ca91"/>
+</svg>

@@ -24,6 +24,7 @@
     <mybatis-plus.version>3.5.7</mybatis-plus.version>
     <lombok.version>1.18.36</lombok.version>
     <mysql.version>8.0.33</mysql.version>
+    <jjwt.version>0.12.6</jjwt.version>
   </properties>
 
   <dependencies>
@@ -50,6 +51,43 @@
       <artifactId>lombok</artifactId>
       <version>${lombok.version}</version>
       <optional>true</optional>
+    </dependency>
+
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-security</artifactId>
+    </dependency>
+
+    <!--
+      邮件发送。Provider 可切换：hanyou.auth.mail.provider=demo 时不发信，
+      只把验证码写进日志；改成 smtp 才真正走这里。详见 config/MailProperties。
+    -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-mail</artifactId>
+    </dependency>
+
+    <!--
+      JWT 三件套。0.12.x 起拆成 api / impl / runtime 三块：
+      只有 api 参与编译，impl 与 jackson 是运行期实现。
+      这么拆是为了让人误用内部类时编译期就报错。
+    -->
+    <dependency>
+      <groupId>io.jsonwebtoken</groupId>
+      <artifactId>jjwt-api</artifactId>
+      <version>${jjwt.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>io.jsonwebtoken</groupId>
+      <artifactId>jjwt-impl</artifactId>
+      <version>${jjwt.version}</version>
+      <scope>runtime</scope>
+    </dependency>
+    <dependency>
+      <groupId>io.jsonwebtoken</groupId>
+      <artifactId>jjwt-jackson</artifactId>
+      <version>${jjwt.version}</version>
+      <scope>runtime</scope>
     </dependency>
 
     <dependency>
