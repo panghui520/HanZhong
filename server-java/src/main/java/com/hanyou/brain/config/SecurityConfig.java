@@ -104,6 +104,16 @@ public class SecurityConfig {
                         // 若把这条挪到 GET 通配之后，GET /api/admin/xxx 会被通配先接走。
                         .requestMatchers(ADMIN_PREFIX).hasRole("OPERATOR")
 
+                        // ---------------- 需要登录：M6 购物车与订单 ----------------
+                        // 都是"我的数据"，必须登录。**没有匿名购物车** —— 匿名车要靠
+                        // Cookie 或 localStorage 认领，中途登录就要处理"这辆车归谁"的
+                        // 合并问题，而本项目下单本来就必须登录，从加购就要求登录更省事。
+                        //
+                        // 虽然兜底的 anyRequest().authenticated() 已经覆盖了它们，
+                        // 这里仍然显式写一行：项目约定是每条新路径都在此留痕，
+                        // review 时一眼能看出"这个接口是公开还是受保护"。
+                        .requestMatchers("/api/cart/**", "/api/orders/**").authenticated()
+
                         // 认证后与个人相关的接口（当前只有 me/logout，见 AuthController）
                         .requestMatchers("/api/me/**").authenticated()
 

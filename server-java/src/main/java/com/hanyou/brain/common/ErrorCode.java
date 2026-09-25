@@ -4,7 +4,8 @@ import lombok.Getter;
 
 /**
  * 业务错误码。区间划分：
- * <p>1xxx 参数/资源，2xxx 数据导入，3xxx 外部依赖，4xxx 认证与权限（M8）。
+ * <p>1xxx 参数/资源，2xxx 数据导入，3xxx 外部依赖，4xxx 认证与权限（M8），
+ * 5xxx 媒体与配图（M9），6xxx 购物车与订单（M6）。
  *
  * <p>4xxx 段分得比较细，是因为注册流程每一道闸的失败原因对用户是不同的行动指引：
  * 冷却中要等、验证码错了要重输、过期了要重发。前端只判断数字就能给出准确文案，
@@ -47,6 +48,18 @@ public enum ErrorCode {
     MEDIA_NOT_FOUND(5005, "图片不存在或已被删除"),
     BANNER_NOT_FOUND(5006, "轮播图不存在或已被删除"),
     MEDIA_ORDER_INVALID(5007, "排序参数不合法"),
+
+    // ---- M6 消费与离境复购 ----
+    // 6xxx 段。"库存不足"与"商品不存在"必须分开：前者用户减少数量还能买，
+    // 后者只能换一件。给同一句"下单失败"等于让用户自己猜。
+    CART_EMPTY(6001, "购物车是空的，先去挑几样吧"),
+    CART_ITEM_NOT_FOUND(6002, "购物车里的这件商品已不存在"),
+    PRODUCT_NOT_FOUND(6003, "商品不存在或已下架"),
+    STOCK_NOT_ENOUGH(6004, "库存不足，请减少数量后再试"),
+    ORDER_NOT_FOUND(6005, "订单不存在"),
+    ORDER_STATUS_INVALID(6006, "订单当前状态不允许该操作"),
+    QUANTITY_INVALID(6007, "数量不合法"),
+    RECEIVER_INVALID(6008, "收货信息不完整"),
 
     INTERNAL(9000, "服务内部错误");
 
