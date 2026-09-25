@@ -12,7 +12,9 @@
    指纹用来判断索引是否过期——数据包改了但没重建时，能明确报出来而不是给出旧答案。
 
 3. **召回与排序是两件事**（见 `query`）。
-   向量负责"别漏掉"，BM25 负责"排对序"。分工的理由与实测数据写在 lexical.py 顶部。
+   向量负责"别漏掉"，排序由 **RRF 融合**负责 —— 只用两路的名次、不用分数，
+   因为 BM25 归一化分与余弦本来就不可比（实测加权方案随权重单调变差）。
+   改用 RRF 的完整对比数据写在 `query` 的 docstring 里。
 """
 
 from __future__ import annotations
@@ -34,6 +36,12 @@ MANIFEST_FILE = "manifest.json"
 # 候选池下限。实测：池子取 20 时 top5 命中与全量 BM25 完全一致（26 条用例），
 # 再放大到 40、83 都没有变化。取 20 是为了在语料长大之后仍然只做局部精排。
 MIN_POOL = 20
+
+# RRF（Reciprocal Rank Fusion）的 k 参数，作用是压平名次差异——k 越小，
+# 头部名次被放得越大。60 是 RRF 原文的默认值。
+# 实测 k 取 1/3/5/10/20/60 时 top1/top5 完全一致（26 条用例），
+# 所以不引入需要额外解释的调参，用默认值即可。
+RRF_K = 60
 
 logger = logging.getLogger("hanyou.ai")
 
@@ -67,11 +75,13 @@ class Hit:
     doc_id: str
     text: str
     score: float
-    """归一化到 [0,1] 的 BM25 相关度，供前端展示"""
+    """归一化到 [0,1] 的 BM25 相关度，供前端展示。**口径未变**"""
     raw: float
-    """BM25 原始分，只用于排序与排查"""
+    """BM25 原始分，只用于排查"""
     vector_score: float
     """余弦相似度。仅作诊断，不参与排序"""
+    fusion: float = 0.0
+    """RRF 融合分，**排序键**。两路名次的调和，不要求两边分数可比"""
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
@@ -250,21 +260,32 @@ class KbStore:
         return out
 
     def query(self, question: str, top_k: int, where: dict | None = None) -> list[Hit]:
-        """混合检索：向量召回 ∪ BM25 召回 → 按 BM25 排序。
+        """混合检索：向量召回 ∪ BM25 召回 → **RRF 融合排序**。
 
         为什么要两个通道而不是只留 BM25：BM25 是词法匹配，遇到完全换一种说法的
         问句（用户的话和语料一个字都不重合）会落空，向量通道能靠语义相似度
-        拉回一些候选。所以这里的分工是：
-        向量只决定"哪些切片进入候选池"，BM25 决定"谁排前面"。
+        拉回候选。
 
-        ⚠️ **这个分工的前提已经变了，值得单独做一轮**：
+        **为什么排序用 RRF 而不是 BM25 单边**（这是实测改过来的，不是偏好）：
+
         分工的原始依据是"向量分数受文档长度影响太大，实测比 BM25 差 6 条"——
-        那是**离线 ngram 实现**的结论。换成厂商语义嵌入（BAAI/bge-m3）后实测：
-        纯向量 top1 命中 22/26，**反超** BM25 的 20/26，两通道互补 8 条
-        （向量独中 5 条，BM25 独中 3 条）。也就是说融合排序（如 RRF）预计能到
-        25/26，而当前"BM25 单边排序"拿不到向量独中的那 5 条。
-        没在这一轮改，是因为排序策略会波及全部检索结果，需要单独一轮完整验收。
-        数据见 docs/验收记录-M3.md。
+        那是**离线 ngram 实现**的结论。换成厂商语义嵌入（BAAI/bge-m3）后，
+        通道消融实测（26 条用例，见 docs/验收记录-M3.md）：
+
+        | 策略 | top1 | top5 |
+        |---|---|---|
+        | BM25 单边（旧） | 20/26 | 26/26 |
+        | 纯向量 | 22/26 | **25/26** |
+        | **RRF 融合（现）** | **23/26** | **26/26** |
+        | 加权归一化 w_bm25=0.3/0.5/0.7 | 22/21/19 | 26/26 |
+
+        纯向量的 top1 更高，但 **top5 掉了一条**——top5 决定喂给模型的上下文，
+        不能降。加权归一化随权重单调变差，说明 BM25 归一化分与余弦**本来就不可比**，
+        硬加权只是凭经验调。RRF 只用名次、不用分数，所以两个指标都不劣且 top1 更高。
+
+        `Hit.score` 仍是 BM25 归一化分（前端"首条相关度"的口径没变）——
+        实测 RRF 排序后首条的 BM25 归一化分落在 19%~78%、**没有一条为 0**，
+        所以展示口径不需要跟着改。`Hit.fusion` 才是排序键。
 
         候选池 = 向量 top-pool ∪ BM25 top-pool。当前语料只有 83 片、pool 取 20，
         实测与全量 BM25 的 top5 命中完全一致；语料长大后 pool 才真正起到限流作用。
@@ -276,37 +297,49 @@ class KbStore:
         raw_scores = self.lexical.raw_scores(question)
         ceiling = self.lexical.score_ceiling(question)
 
-        # BM25 侧的候选
-        bm25_order = sorted(range(len(raw_scores)), key=lambda i: -raw_scores[i])
-        candidates: dict[int, float] = {
-            i: raw_scores[i] for i in bm25_order[:pool] if raw_scores[i] > 0
-        }
+        # 两路通道各自的名次（名次从 1 起）。
+        # RRF 只用名次、不用分数，这样就不必去解决"BM25 分和余弦怎么放到同一个
+        # 量纲"这个本来就没有正确答案的问题 —— 加权方案实测随权重单调变差。
+        bm25_order = [
+            i
+            for i in sorted(range(len(raw_scores)), key=lambda i: -raw_scores[i])
+            if raw_scores[i] > 0
+        ][:pool]
 
-        # 向量侧的候选：只补 BM25 没选中的
+        fusion: dict[int, float] = {}
+        for rank, index in enumerate(bm25_order, 1):
+            fusion[index] = fusion.get(index, 0.0) + 1.0 / (RRF_K + rank)
+
+        # 向量侧按返回顺序即名次（_vector_candidates 保证相似度降序）
         vector_scores: dict[str, float] = {}
-        for chunk_id, similarity in self._vector_candidates(question, pool, where):
+        for rank, (chunk_id, similarity) in enumerate(
+            self._vector_candidates(question, pool, where), 1
+        ):
             vector_scores[chunk_id] = similarity
             index = self._index_of_chunk.get(chunk_id)
-            if index is not None and index not in candidates:
-                candidates[index] = raw_scores[index]
+            if index is not None:
+                fusion[index] = fusion.get(index, 0.0) + 1.0 / (RRF_K + rank)
 
-        # 同一篇文档只保留得分最高的切片
+        # 同一篇文档只保留融合分最高的切片
         hits: list[Hit] = []
         seen_docs: set[str] = set()
-        for index in sorted(candidates, key=lambda i: -candidates[i]):
+        for index in sorted(fusion, key=lambda i: -fusion[i]):
             chunk = self.lexical.chunks[index]
             if chunk.doc_id in seen_docs:
                 continue
             seen_docs.add(chunk.doc_id)
-            raw = candidates[index]
+            raw = raw_scores[index]
             hits.append(
                 Hit(
                     chunk_id=chunk.chunk_id,
                     doc_id=chunk.doc_id,
                     text=chunk.text,
-                    score=min(1.0, raw / ceiling),
+                    # ceiling 理论上不会为 0（查询词全不在语料时 raw 也都是 0），
+                    # 但除法不该依赖"理论上"，留一个显式分支
+                    score=min(1.0, raw / ceiling) if ceiling else 0.0,
                     raw=raw,
                     vector_score=vector_scores.get(chunk.chunk_id, 0.0),
+                    fusion=fusion[index],
                     metadata=_flatten_metadata(chunk),
                 )
             )
@@ -317,8 +350,11 @@ class KbStore:
     def _vector_candidates(
         self, question: str, pool: int, where: dict | None
     ) -> list[tuple[str, float]]:
-        """向量通道的召回。集合为空或维度不符时静默退化为"没有候选"，
-        让检索仍然能靠 BM25 出结果，而不是整个请求失败。"""
+        """向量通道的召回。**返回顺序按相似度降序**（Chroma 的 query 按距离升序
+        返回，这里保持它给的顺序），调用方直接把这个顺序当名次，不要再排一次。
+
+        集合为空或维度不符时静默退化为"没有候选"，让检索仍然能靠 BM25 出结果，
+        而不是整个请求失败 —— 但失败会记一条日志，见 `_warn_vector_failure`。"""
         try:
             vector = self.embedder.embed(question, restrict_vocab=True)
             result = self._collection.query(

@@ -36,6 +36,13 @@ MAX_SOURCES = 5
 
 
 def _sources_from_hits(hits: Sequence[Hit]) -> list[dict[str, Any]]:
+    """把命中转成前端要的来源列表。
+
+    `score` 是 **BM25 归一化分**，不是排序键 —— 排序由 `store.query()` 的 RRF
+    融合分决定，所以这个数组里的 score **不保证单调递减**（第 3 条可能比第 1 条高）。
+    前端只用它展示首条相关度（`meta.top_score`），不逐条展示；保留它是为了排查时
+    能看到每条来源各自的词法相关度。
+    """
     return [
         {
             "title": h.metadata.get("title", ""),

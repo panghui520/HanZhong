@@ -1,4 +1,8 @@
-"""词法检索：BM25 排序 + 主题缺口判定。
+"""词法检索：BM25 打分 + 主题缺口判定。
+
+**打分，不是排序。** 排序由 store.query() 的 RRF 融合负责（它同时看 BM25 名次
+与向量名次）。这里只提供每个切片的 BM25 原始分与归一化上限，
+"谁排前面"是上层的事 —— 早先这里有一个 `rank()` 自己排序，随 RRF 落地已删除。
 
 这个模块是 M3 检索质量的主要承担者。两个能力都建立在同一份语料统计上：
 
@@ -47,7 +51,6 @@ from __future__ import annotations
 
 import math
 from collections import Counter
-from dataclasses import dataclass, field
 from typing import Mapping, Sequence
 
 from .aliases import expand
@@ -95,17 +98,6 @@ NON_TOPIC_FLAGS = frozenset(
 )
 
 
-@dataclass
-class Scored:
-    """一条命中。score 是归一化到 [0,1] 的相关度，便于前端展示。"""
-
-    doc_id: str
-    chunk_id: str
-    score: float
-    raw: float
-    metadata: dict = field(default_factory=dict)
-
-
 class LexicalIndex:
     """语料词表 + BM25。构建成本很低（83 片语料约几十毫秒），随服务启动重建。"""
 
@@ -114,8 +106,6 @@ class LexicalIndex:
         self.tfs = [Counter(tokenize(c.text)) for c in self.chunks]
         self.lens = [sum(tf.values()) for tf in self.tfs]
         self.avgdl = (sum(self.lens) / len(self.lens)) if self.lens else 1.0
-        self.doc_ids = [c.doc_id for c in self.chunks]
-        self.chunk_ids = [c.chunk_id for c in self.chunks]
 
         df: Counter[str] = Counter()
         for tf in self.tfs:
@@ -129,6 +119,14 @@ class LexicalIndex:
     # ---- 打分 ----
 
     def raw_scores(self, question: str) -> list[float]:
+        """每个切片的 BM25 原始分（与 self.chunks 同序）。
+
+        这是给上层的**打分**接口：store.query() 用它算 BM25 名次，再与向量名次
+        做 RRF 融合；score_ceiling() 用它归一化成展示用的百分比。
+
+        曾经这里还有一个 `rank()` 做"纯 BM25 排序 + 文档去重"，随 RRF 落地
+        已删除（它已无调用点）。纯 BM25 的对比数据保留在 docs/验收记录-M3.md。
+        """
         query = Counter(tokenize(question))
         if not query:
             return [0.0] * len(self.chunks)
@@ -154,31 +152,6 @@ class LexicalIndex:
         """
         query = Counter(tokenize(question))
         return (K1 + 1) * sum(self.idf.get(term, 0.0) for term in query) or 1.0
-
-    def rank(self, question: str, top_k: int) -> list[Scored]:
-        """按 BM25 排序，同一篇文档只保留最高分切片。"""
-        raw = self.raw_scores(question)
-        ceiling = self.score_ceiling(question)
-
-        order = sorted(range(len(raw)), key=lambda i: -raw[i])
-        best: dict[str, Scored] = {}
-        for i in order:
-            if raw[i] <= 0:
-                break
-            doc_id = self.doc_ids[i]
-            if doc_id in best:
-                continue
-            best[doc_id] = Scored(
-                doc_id=doc_id,
-                chunk_id=self.chunk_ids[i],
-                score=min(1.0, raw[i] / ceiling),
-                raw=raw[i],
-            )
-        return list(best.values())[:top_k]
-
-    def rank_all(self, question: str) -> list[Scored]:
-        """不截断的完整排序，供候选池融合使用。"""
-        return self.rank(question, len(self.chunks))
 
     # ---- 主题缺口 ----
 
