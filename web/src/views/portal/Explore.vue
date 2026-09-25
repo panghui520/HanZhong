@@ -1,5 +1,32 @@
 <script setup lang="ts">
+/**
+ * 探索汉中（M1 资源网络 + M6 分类改版）
+ *
+ * ============================================================
+ * 这一版为什么把「主题」从一级降成二级
+ * ============================================================
+ * 上一版一级是主题（山水 / 人文 / 乡野），业态降成二级标签。
+ * 上线后发现它有两个实测问题（都是数出来的，不是感觉）：
+ *
+ *   1. **餐饮只有 6 条、住宿只有 4 条**，还被 3 个主题拆散 ——
+ *      切到「山水」只剩 2 条餐饮，切到「乡野」餐饮和住宿都是 0。
+ *      用户想找吃的地方，得先猜它被归进了哪个主题，猜错就是空列表。
+ *   2. **主题是"编辑视角"而不是"检索视角"**。游客找住处时想的是
+ *      "住宿"，不是"人文"。主题适合做导览叙事，不适合当一级筛选。
+ *
+ * 所以这一版：
+ *   - **一级 = 类别**（景点 / 乡村 / 餐饮 / 住宿 / 交通），条数来自真实数据；
+ *   - **二级 = 主题**，降级成一行可取消的筛选标签；
+ *   - **三级 = 区县 + 关键词**。
+ *
+ * 刻意**不做「全部」这一档**：混着看正是"一进来很乱"的来源。
+ * 想看全局有页头那四个数字，想换类有 5 个带条数的类别按钮。
+ *
+ * 类别可以进 URL（`?type=SCENIC`），刷新和分享都能保持在同一类里。
+ * ============================================================
+ */
 import { computed, nextTick, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import SceneArt from '@/components/SceneArt.vue'
 import PoiImage from '@/components/PoiImage.vue'
 import SectionHead from '@/components/SectionHead.vue'
@@ -9,116 +36,125 @@ import { useReveal } from '@/composables/useReveal'
 import { BUSINESS_LABEL, BUSINESS_ORDER, type BusinessType, type Poi } from '@/types'
 import { capacityUsage } from '@/mock/stats'
 
+const route = useRoute()
+const router = useRouter()
+
 const { data, loading, error, reload } = useAsync(getCityPack)
 
 const root = ref<HTMLElement | null>(null)
 
 /* ============================================================
- * 主题分类：把 5 个「业态」（业务口径）重新组织成 3 个「主题」
- * （游客口径）。
+ * 主题（二级）：把 5 个「业态」（业务口径）重新组织成 3 个「主题」（游客口径）
  *
- * 为什么要多这一层：业态是系统调度用的分类，游客不按"业态"想事情 ——
- * 他想的是"我要看山水 / 看人文 / 去乡村"。而 `business_type` 里
- * 只有 SCENIC / RURAL_SPOT / FOOD / LODGING / TRANSPORT 五种，
- * 直接铺出来是"资源台账"，不是"目的地探索"。
- *
- * 主题的判定顺序有讲究：
+ * 主题仍然有价值 —— 它是"怎么逛"的叙事（看山水 / 看人文 / 去乡村），
+ * 只是不该占着一级的位置。判定顺序：
  *   - RURAL_SPOT 优先归「乡村」—— 它是本项目的主张所在（把客流导向乡村），
  *     不能被"山水"吸走（不少乡村示范点本身也在秦岭里）。
- *     数据实测 12 条 RURAL_SPOT 全部落进乡村主题。
- *   - 餐饮/住宿/交通不单独成主题（它们不是"目的地"，是配套），
- *     而是按 `scene` 归到山水或人文主题里，充当"顺路可去"的补充。
+ *   - 餐饮/住宿/交通按 `scene` 归到山水或人文，充当"顺路可去"的补充。
  * ============================================================ */
 
-/** 三个主题的键。声明在 themeOf 之前，下面的函数签名要用到。 */
 type ThemeKey = 'landscape' | 'culture' | 'rural'
 
-/**
- * 一条 POI 属于哪个主题。`scene` 作为辅助信号。
- *
- * 注意 `scene` 在类型上是可选字段（`string | undefined`），
- * 所以判断的是"是否属于自然场景集合"，而不是 `includes(undefined)`。
- */
 function themeOf(p: Poi): ThemeKey {
-  // 乡村优先，理由见上方注释：这是项目主张所在，不能被"山水"吸走
   if (p.business_type === 'RURAL_SPOT') return 'rural'
-  // terrace/rapeseed 是山野田园，river/hanjiang 是水，都算"山水"；
-  // qinling 是秦岭云海；ancient 是古建街巷 → 人文
   const s = p.scene ?? ''
-  const isNature = s === 'qinling' || s === 'terrace' || s === 'rapeseed' || s === 'river' || s === 'hanjiang'
+  const isNature =
+    s === 'qinling' || s === 'terrace' || s === 'rapeseed' || s === 'river' || s === 'hanjiang'
   return isNature ? 'landscape' : 'culture'
 }
 
-const THEMES: {
-  key: ThemeKey
-  label: string
-  latin: string
-  desc: string
-  scene: 'qinling' | 'ancient' | 'terrace'
-}[] = [
-  {
-    key: 'landscape',
-    label: '山水汉中',
-    latin: 'Landscape',
-    desc: '秦岭云海、汉江碧水与茶园梯田。占据全境最集中的自然观光资源，也是最需要做承载力分流的区域。',
-    scene: 'qinling',
-  },
-  {
-    key: 'culture',
-    label: '人文汉中',
-    latin: 'Culture',
-    desc: '两汉三国旧地。古建街巷、栈道遗迹与市井小吃，多集中在城区与盆地，适合与山水行程错峰组合。',
-    scene: 'ancient',
-  },
-  {
-    key: 'rural',
-    label: '乡野汉中',
-    latin: 'Countryside',
-    desc: '省级乡村旅游示范村、非遗工坊与有机农业基地。它们离热门景区不远，是分流承接的主力。',
-    scene: 'terrace',
-  },
+const THEMES: { key: ThemeKey; label: string }[] = [
+  { key: 'landscape', label: '山水' },
+  { key: 'culture', label: '人文' },
+  { key: 'rural', label: '乡野' },
 ]
 
-const activeTheme = ref<ThemeKey>('landscape')
-const activeType = ref<BusinessType | 'ALL'>('ALL')
-const keyword = ref('')
-const district = ref<string>('')
+/**
+ * 一级：类别
+ *
+ * 顺序沿用 `BUSINESS_ORDER`（景区 → 乡村 → 餐饮 → 住宿 → 交通），
+ * 而不是按条数排 —— 顺序稳定，用户第二次来时按钮还在原位。
+ * 条数为 0 的类别（当前数据包里 SHOPPING 是 0 条）不显示，
+ * 免得给出一个点进去必然为空的入口。
+ *
+ * 类别名一律取 `BUSINESS_LABEL`，不在这里另起一套文案：
+ * 第一类显示的是「景区」而不是口语里的「景点」—— 因为详情页、卡片角标、
+ * 管理端用的都是同一套 `business_type` 词汇，这一页改成"景点"就会出现
+ * 同一个东西两个名字，用户在两页之间来回看会以为不是一回事。
+ */
+
+/** 每个类别一句话说明。文案讲的是"这类资源在调度网络里扮演什么角色" */
+const CAT_DESC: Record<BusinessType, string> = {
+  SCENIC: '秦岭与汉江之间的自然人文景观，是最需要做承载力分流的入口',
+  RURAL_SPOT: '乡村旅游示范村与非遗工坊，离热门景区不远，是分流承接的主力',
+  FOOD: '市井小吃与地方菜，多在城区与县城，适合与山水行程错峰组合',
+  LODGING: '民宿、乡村会客厅与县城酒店，是过夜消费与次日分流的落点',
+  TRANSPORT: '高铁站、客运枢纽与旅游专线，决定客流怎么进城、往哪散',
+  SHOPPING: '特产与手作门店，与乡村好物互为补充',
+}
 
 const allPois = computed<Poi[]>(() => data.value?.pois ?? [])
 
-/** 每个主题下有多少条 —— 数字来自真实数据，不是写死的 */
-function countOf(k: ThemeKey) {
-  return allPois.value.filter((p) => themeOf(p) === k).length
+function countOfType(t: BusinessType) {
+  return allPois.value.filter((p) => p.business_type === t).length
 }
 
-/** 当前主题下的可选业态（只显示该主题里真的有的，不列空标签） */
-const tabs = computed(() => {
-  const inTheme = allPois.value.filter((p) => themeOf(p) === activeTheme.value)
-  const present = BUSINESS_ORDER.filter((t) => inTheme.some((p) => p.business_type === t))
-  return [
-    { key: 'ALL' as const, label: '全部', n: inTheme.length },
-    ...present.map((t) => ({ key: t, label: BUSINESS_LABEL[t], n: inTheme.filter((p) => p.business_type === t).length })),
-  ]
-})
+const cats = computed(() =>
+  BUSINESS_ORDER.filter((t) => countOfType(t) > 0).map((t) => ({
+    key: t,
+    label: BUSINESS_LABEL[t],
+    n: countOfType(t),
+    desc: CAT_DESC[t],
+  }))
+)
 
-const districts = computed(() => {
-  const set = new Set(
-    allPois.value.filter((p) => themeOf(p) === activeTheme.value).map((p) => p.district)
-  )
-  return Array.from(set).sort()
-})
+/** 初始类别：URL 里给了合法值就用它，否则默认「景点」——多数人来汉中就是看景点 */
+const VALID_TYPES = new Set<string>(BUSINESS_ORDER)
+function initialType(): BusinessType {
+  const q = route.query.type
+  return typeof q === 'string' && VALID_TYPES.has(q) ? (q as BusinessType) : 'SCENIC'
+}
 
-/** 主题下的全部资源（未筛选）—— 用于取"主推"与"精选" */
-const themePois = computed<Poi[]>(() => allPois.value.filter((p) => themeOf(p) === activeTheme.value))
+const activeType = ref<BusinessType>(initialType())
+const activeTheme = ref<ThemeKey | 'ALL'>('ALL')
+const keyword = ref('')
+const district = ref<string>('')
+
+/** 当前类别下的全部资源（未做二级/三级筛选） */
+const catPois = computed<Poi[]>(() => allPois.value.filter((p) => p.business_type === activeType.value))
+
+/** 二级：当前类别下真实存在的主题，带条数 */
+const themeChips = computed(() =>
+  THEMES.map((t) => ({
+    ...t,
+    n: catPois.value.filter((p) => themeOf(p) === t.key).length,
+  })).filter((t) => t.n > 0)
+)
+
+/** 三级：当前类别覆盖的区县 */
+const districts = computed(() =>
+  Array.from(new Set(catPois.value.map((p) => p.district))).sort()
+)
 
 /**
- * 主推的那一条：优先 A 级景区，其次取承载力最高的一条。
+ * 是否处于"有二级/三级筛选"的状态 —— 决定要不要隐藏主推区。
+ *
+ * 注意：**类别不算筛选条件**。它是一级导航，永远有一个选中值，
+ * 所以不进这个判断，否则主推区永远不会出现。
+ */
+const filtered = computed(
+  () => activeTheme.value !== 'ALL' || !!district.value || !!keyword.value.trim()
+)
+
+/* ============================================================
+ * 主推与精选：在当前类别内按「等级 + 承载力」挑
  *
  * 为什么按承载力选：这个页面要讲的主张是"承载力驱动分流"，
- * 把带 4A 头衔又最拥挤的那条放在头条位置，页面自己就在陈述问题。
- */
+ * 把带 4A 头衔又最拥挤的那一条放在头条位置，页面自己就在陈述问题。
+ * ============================================================ */
+
 const featured = computed<Poi | null>(() => {
-  const pool = themePois.value
+  const pool = catPois.value
   if (!pool.length) return null
   const ranked = [...pool].sort((a, b) => {
     const la = a.level === '4A' ? 1 : 0
@@ -129,21 +165,21 @@ const featured = computed<Poi | null>(() => {
   return ranked[0] ?? null
 })
 
-/** 主推之外的次级精选：3 条，尽量不同区县、不同业态，避免看起来是"同一个地方的三张图" */
+/** 次级精选：尽量不同区县、不同主题，避免看起来是"同一个地方的三张图" */
 const picks = computed<Poi[]>(() => {
   const used = new Set<string>()
   const out: Poi[] = []
-  for (const p of themePois.value) {
+  for (const p of catPois.value) {
     if (p.id === featured.value?.id) continue
-    if (used.has(p.district) || used.has(p.business_type)) continue
+    if (used.has(p.district) || used.has(themeOf(p))) continue
     out.push(p)
     used.add(p.district)
-    used.add(p.business_type)
+    used.add(themeOf(p))
     if (out.length === 3) break
   }
   // 不够 3 条就放宽条件补齐（数据少时不能空着）
   if (out.length < 3) {
-    for (const p of themePois.value) {
+    for (const p of catPois.value) {
       if (out.length >= 3) break
       if (p.id === featured.value?.id) continue
       if (out.some((x) => x.id === p.id)) continue
@@ -153,10 +189,31 @@ const picks = computed<Poi[]>(() => {
   return out
 })
 
-/** 筛选后的列表（含主推与精选，它们是"全部"的一部分） */
+/** 主推区只在资源足够多、且没做二级/三级筛选时出现 */
+const showFeatured = computed(
+  () => !!featured.value && !filtered.value && catPois.value.length >= 5
+)
+
+/** 主推区的标题跟着类别走 —— 每一类"最该去的那一处"理由不一样 */
+const featTitle = computed(() => {
+  switch (activeType.value) {
+    case 'SCENIC':
+      return '这一类里最该错峰去的那一处'
+    case 'RURAL_SPOT':
+      return '离景区最近、最能承接客流的一处'
+    case 'FOOD':
+      return '到汉中该先吃的那一口'
+    case 'LODGING':
+      return '住下来，第二天才有得玩'
+    default:
+      return '客流从这里进城'
+  }
+})
+
+/** 列表：类别 ∩ 主题 ∩ 区县 ∩ 关键词 */
 const list = computed<Poi[]>(() => {
-  let arr = themePois.value
-  if (activeType.value !== 'ALL') arr = arr.filter((p) => p.business_type === activeType.value)
+  let arr = catPois.value
+  if (activeTheme.value !== 'ALL') arr = arr.filter((p) => themeOf(p) === activeTheme.value)
   if (district.value) arr = arr.filter((p) => p.district === district.value)
   const kw = keyword.value.trim()
   if (kw) {
@@ -167,11 +224,6 @@ const list = computed<Poi[]>(() => {
   return arr
 })
 
-/** 是否处于"有筛选条件"的状态 —— 决定要不要隐藏主推区（筛选时应该直接看结果） */
-const filtered = computed(
-  () => activeType.value !== 'ALL' || !!district.value || !!keyword.value.trim()
-)
-
 /** 全站统计，放在页头 */
 const stats = computed(() => ({
   total: allPois.value.length,
@@ -180,14 +232,7 @@ const stats = computed(() => ({
   scenic4a: allPois.value.filter((p) => p.level === '4A').length,
 }))
 
-/**
- * 乡村好物。取前 4 款在售产品，每款都带上它挂靠的那次体验名。
- *
- * 为什么要在这页放好物：本页此前只用了 POI 数据，M2 的体验与产品一点没用上。
- * 而"带得走的汉中"恰恰是"把一次到访变成持续消费链"的落点 ——
- * 产品上的 `experience_name` 让这句话可核对：这一款对应哪次体验。
- */
-const goods = computed(() => (data.value?.products ?? []).slice(0, 4))
+/* ---------- 交互 ---------- */
 
 function usage(p: Poi) {
   return capacityUsage(p.id, p.business_type)
@@ -203,19 +248,34 @@ function usageLevel(p: Poi) {
 }
 const LOAD_LABEL: Record<string, string> = { ok: '舒适', warn: '偏忙', danger: '拥挤' }
 
-function clearFilters() {
-  activeType.value = 'ALL'
+/** 清掉二级与三级筛选，但**不动类别** —— 类别是一级导航，不是筛选条件 */
+function clearSubFilters() {
+  activeTheme.value = 'ALL'
   district.value = ''
   keyword.value = ''
 }
 
-/** 切主题时清掉筛选 —— 否则会出现"新主题 + 旧区县"的空结果，看着像坏了 */
-watch(activeTheme, () => {
-  clearFilters()
-})
+function pickType(t: BusinessType) {
+  if (activeType.value === t) return
+  activeType.value = t
+  // 类别进 URL：刷新后还在这一类，链接也能直接分享
+  void router.replace({ query: { ...route.query, type: t } })
+  scrollToGrid()
+}
+
+/**
+ * 切类别时清掉二级/三级筛选。
+ * 否则会出现"新类别 + 旧区县"的空结果 —— 用户看着像页面坏了，
+ * 而实际上只是筛选条件互相矛盾。
+ */
+watch(activeType, clearSubFilters)
 
 // 列表重绘后要重新扫描一遍新的 .reveal 元素
-useReveal(root, loading, computed(() => `${activeTheme.value}|${activeType.value}|${district.value}|${keyword.value}`))
+useReveal(
+  root,
+  loading,
+  computed(() => `${activeType.value}|${activeTheme.value}|${district.value}|${keyword.value}`)
+)
 
 function scrollToGrid() {
   nextTick(() => {
@@ -234,8 +294,8 @@ function scrollToGrid() {
         <span class="eyebrow eyebrow--light">目的地探索 · 汉中</span>
         <h1 class="display exbanner__title">把一城资源<br />看成一张可以调度的网络</h1>
         <p class="exbanner__desc">
-          景区、乡村、餐饮、住宿与交通不是各自独立的模块，而是同一张文旅资源网络上的节点。
-          每一条都带着容量上限与实时占用率 —— 这正是"把客流从拥挤处导向有余处"的依据。
+          先按类别看：景点、乡村、餐饮、住宿、交通各自成一片。每一处都带着容量上限与实时占用率 ——
+          这正是"把客流从拥挤处导向有余处"的依据。
         </p>
 
         <dl v-if="!loading" class="exstats">
@@ -261,7 +321,7 @@ function scrollToGrid() {
 
     <!-- ============ 2. 空 / 错误 / 加载 ============ -->
     <div v-if="loading" class="container section">
-      <div class="skeleton" style="height: 420px; border-radius: 10px" />
+      <div class="skeleton" style="height: 168px; border-radius: 10px" />
       <div class="grid grid-3" style="margin-top: 24px">
         <div v-for="i in 3" :key="i" class="skeleton" style="height: 180px; border-radius: 10px" />
       </div>
@@ -275,45 +335,72 @@ function scrollToGrid() {
     </div>
 
     <template v-else>
-      <!-- ============ 3. 主题带（山水 / 人文 / 乡村） ============ -->
+      <!-- ============ 3. 一级：类别 ============ -->
       <section class="container section">
         <SectionHead
-          eyebrow="怎么逛"
-          title="先选一种走法，再看具体去处"
-          desc="按游客的直觉分主题，而不是按系统内部的业态清单。每个主题下的资源由统一网络实时供给。"
+          eyebrow="第一步 · 选类别"
+          title="先选一类，再看具体去处"
+          desc="类别按游客的检索习惯划分，不混着铺。条数是数据包里的真实条数，不是写死的。"
         />
-        <div class="themes">
+
+        <div class="cats">
           <button
-            v-for="t in THEMES"
-            :key="t.key"
-            class="theme reveal"
-            :class="{ 'theme--on': activeTheme === t.key }"
-            @click="activeTheme = t.key; scrollToGrid()"
+            v-for="c in cats"
+            :key="c.key"
+            class="cat reveal"
+            :class="{ 'cat--on': activeType === c.key }"
+            @click="pickType(c.key)"
           >
-            <div class="theme__art">
-              <SceneArt :variant="t.scene" ratio="16 / 9" class="theme__scene" />
-              <div class="theme__scrim" />
-              <span class="theme__latin">{{ t.latin }}</span>
-              <span class="theme__n num">{{ countOf(t.key) }}<i>处</i></span>
-            </div>
-            <div class="theme__body">
-              <h3 class="theme__title">{{ t.label }}</h3>
-              <p class="theme__desc">{{ t.desc }}</p>
-              <span class="theme__go">
-                {{ activeTheme === t.key ? '正在浏览' : '进入主题' }}
-                <i class="theme__arrow">→</i>
-              </span>
-            </div>
-            <span class="theme__rule" />
+            <span class="cat__top">
+              <span class="cat__label">{{ c.label }}</span>
+              <span class="cat__n num">{{ c.n }}</span>
+            </span>
+            <span class="cat__desc">{{ c.desc }}</span>
+            <span class="cat__rule" />
           </button>
         </div>
       </section>
 
-      <!-- ============ 4. 主题主推 + 精选（非对称：1.32fr : 1fr） ============ -->
-      <section v-if="featured && !filtered" class="container section-0">
+      <!-- ============ 4. 二级：主题（可取消） ============ -->
+      <section class="container section-0">
+        <div class="toolbar">
+          <div class="toolbar__left">
+            <span class="toolbar__k">主题</span>
+            <div class="chips">
+              <button
+                class="chip"
+                :class="{ 'chip--on': activeTheme === 'ALL' }"
+                @click="activeTheme = 'ALL'"
+              >
+                全部<i class="chip__n num">{{ catPois.length }}</i>
+              </button>
+              <button
+                v-for="t in themeChips"
+                :key="t.key"
+                class="chip"
+                :class="{ 'chip--on': activeTheme === t.key }"
+                @click="activeTheme = activeTheme === t.key ? 'ALL' : t.key"
+              >
+                {{ t.label }}<i class="chip__n num">{{ t.n }}</i>
+              </button>
+            </div>
+          </div>
+
+          <div class="toolbar__right">
+            <select v-model="district" class="select">
+              <option value="">全部区县</option>
+              <option v-for="d in districts" :key="d" :value="d">{{ d }}</option>
+            </select>
+            <input v-model="keyword" class="input" type="search" placeholder="搜索名称 / 特色" />
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ 5. 主推 + 精选（非对称：1.32fr : 1fr） ============ -->
+      <section v-if="showFeatured && featured" class="container section-0">
         <SectionHead
           eyebrow="本期主推"
-          :title="activeTheme === 'landscape' ? '最该错峰去的那一处' : activeTheme === 'culture' ? '老城里最值得慢下来的一段' : '离景区最近、最能承接客流的一处'"
+          :title="featTitle"
           desc="主推依据是承载力与等级：把当前最拥挤或最有代表性的那一条放在这里，而不是随机取一条。"
           size="md"
         />
@@ -331,14 +418,17 @@ function scrollToGrid() {
             <div class="feat__veil" />
             <div class="feat__body">
               <div class="feat__tags">
-                <span class="tag tag-gold">{{ featured.level || BUSINESS_LABEL[featured.business_type] }}</span>
+                <span class="tag tag-gold">{{
+                  featured.level || BUSINESS_LABEL[featured.business_type]
+                }}</span>
                 <span class="tag tag-on-dark">{{ featured.district }}</span>
               </div>
               <h3 class="feat__title">{{ featured.name }}</h3>
               <p class="feat__summary">{{ featured.summary }}</p>
               <div class="feat__foot">
                 <span class="feat__load" :class="`feat__load--${usageLevel(featured)}`">
-                  <i class="feat__dot" />当前承载 {{ usageText(featured) }} · {{ LOAD_LABEL[usageLevel(featured)] }}
+                  <i class="feat__dot" />当前承载 {{ usageText(featured) }} ·
+                  {{ LOAD_LABEL[usageLevel(featured)] }}
                 </span>
                 <span class="feat__more">查看详情 →</span>
               </div>
@@ -368,41 +458,19 @@ function scrollToGrid() {
         </div>
       </section>
 
-      <!-- ============ 5. 资源列表（筛选 + 网格） ============ -->
+      <!-- ============ 6. 资源列表 ============ -->
       <section id="explore-list" class="container section">
         <SectionHead
           eyebrow="资源清单"
-          title="每一处都可以进同一张调度表"
-          desc="按业态与区县继续收窄。列表顺序来自数据包编码顺序，不代表推荐排序。"
+          :title="`${BUSINESS_LABEL[activeType]} · ${list.length} 处`"
+          desc="按主题与区县继续收窄。列表顺序来自数据包编码顺序，不代表推荐排序。"
           size="md"
         />
 
-        <div class="toolbar">
-          <div class="tabs">
-            <button
-              v-for="t in tabs"
-              :key="t.key"
-              class="tabs__item"
-              :class="{ 'tabs__item--on': activeType === t.key }"
-              @click="activeType = t.key as any"
-            >
-              {{ t.label }}<i class="tabs__n num">{{ t.n }}</i>
-            </button>
-          </div>
-
-          <div class="toolbar__right">
-            <select v-model="district" class="select">
-              <option value="">全部区县</option>
-              <option v-for="d in districts" :key="d" :value="d">{{ d }}</option>
-            </select>
-            <input v-model="keyword" class="input" type="search" placeholder="搜索名称 / 特色" />
-          </div>
-        </div>
-
         <div v-if="isEmpty(list)" class="empty">
-          <div class="empty__title">没有符合条件的资源</div>
-          <div class="empty__desc">换个关键词，或清掉筛选条件再试</div>
-          <button class="btn btn-ghost btn-sm" style="margin-top: 16px" @click="clearFilters">
+          <div class="empty__title">这一类里没有符合条件的资源</div>
+          <div class="empty__desc">换个关键词，或清掉主题与区县筛选再试</div>
+          <button class="btn btn-ghost btn-sm" style="margin-top: 16px" @click="clearSubFilters">
             清空筛选
           </button>
         </div>
@@ -410,7 +478,7 @@ function scrollToGrid() {
         <template v-else>
           <div class="result-count">
             <span class="num result-count__num">{{ list.length }}</span>
-            <span class="muted small">处资源 · 按承载力与距离统一调度</span>
+            <span class="muted small">处{{ BUSINESS_LABEL[activeType] }} · 按承载力与距离统一调度</span>
           </div>
           <div class="grid grid-3">
             <router-link
@@ -468,32 +536,21 @@ function scrollToGrid() {
         </template>
       </section>
 
-      <!-- ============ 6. 乡村好物（M2 数据） ============ -->
-      <section v-if="goods.length" class="container section">
-        <SectionHead
-          eyebrow="离境之后"
-          title="体验过的，可以带走"
-          desc="每一款都挂着一次具体的乡村体验 —— 先认下那片产地，再谈复购。这也是消费链从景区延伸到乡村的落点。"
-          size="md"
-        />
-        <div class="goods">
-          <router-link
-            v-for="(g, i) in goods"
-            :key="g.id"
-            :to="g.poi_id ? `/poi/${g.poi_id}` : '/explore'"
-            class="good reveal"
-            :style="{ transitionDelay: `${i * 60}ms` }"
-          >
-            <div class="good__top">
-              <span class="tag tag-gold">{{ g.category }}</span>
-              <span class="num good__price">¥{{ g.price }}</span>
-            </div>
-            <h3 class="good__name">{{ g.name }}</h3>
-            <p class="good__spec">{{ g.spec }} · 产地 {{ g.origin_village }}</p>
-            <p class="good__story">{{ g.story }}</p>
-            <p v-if="g.experience_name" class="good__exp">
-              <i class="good__exp-k">体验锚点</i>{{ g.experience_name }}
+      <!-- ============ 7. 离境复购入口（原「乡村好物」网格） ============
+           这里不再铺商品卡：农产品有独立的离境复购页（/goods），
+           在这一页铺 4 张卡既让层级变乱，也和那一页重复。 -->
+      <section class="container section">
+        <div class="exit">
+          <div class="exit__body">
+            <span class="eyebrow">离境之后</span>
+            <h2 class="h2 exit__title">体验过的，可以带走</h2>
+            <p class="exit__desc">
+              乡村好物在独立的一页：按产地逛，每一款都挂着一处乡村点与一次具体体验，
+              挑好填收货信息即可，由运营统一发货。
             </p>
+          </div>
+          <router-link to="/goods" class="btn btn-gold btn-lg exit__btn">
+            去乡村好物 →
           </router-link>
         </div>
       </section>
@@ -571,128 +628,164 @@ function scrollToGrid() {
   line-height: 1;
 }
 
-/* ============ 3. 主题带 ============ */
-.themes {
+/* ============ 3. 一级：类别 ============ */
+.cats {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: var(--sp-5);
+  grid-template-columns: repeat(auto-fit, minmax(196px, 1fr));
+  gap: var(--sp-4);
 }
-.theme {
+.cat {
   position: relative;
-  display: flex;
-  flex-direction: column;
-  text-align: left;
-  background: #fff;
-  border: 1px solid var(--line-soft);
-  border-radius: var(--r-lg);
-  overflow: hidden;
-  cursor: pointer;
-  transition: transform var(--dur-2) var(--ease), box-shadow var(--dur-2) var(--ease),
-    border-color var(--dur-2) var(--ease);
-}
-.theme:hover {
-  transform: translateY(-4px);
-  box-shadow: var(--sh-3);
-  border-color: var(--line);
-}
-.theme--on {
-  border-color: var(--brand-500);
-  box-shadow: var(--sh-brand);
-}
-.theme__art {
-  position: relative;
-  overflow: hidden;
-}
-.theme__scene {
-  border-radius: 0;
-  transition: transform 900ms var(--ease);
-}
-.theme:hover .theme__scene {
-  transform: scale(1.045);
-}
-.theme__scrim {
-  position: absolute;
-  inset: 0;
-  background: linear-gradient(180deg, rgba(11, 33, 25, 0.1) 0%, rgba(11, 33, 25, 0.55) 100%);
-}
-.theme__latin {
-  position: absolute;
-  left: var(--sp-4);
-  bottom: var(--sp-3);
-  font-family: var(--font-num);
-  font-size: var(--fs-cap);
-  letter-spacing: 0.2em;
-  text-transform: uppercase;
-  color: rgba(255, 255, 255, 0.72);
-}
-.theme__n {
-  position: absolute;
-  right: var(--sp-4);
-  bottom: var(--sp-3);
-  font-size: 26px;
-  font-weight: 600;
-  color: #fff;
-  line-height: 1;
-}
-.theme__n i {
-  font-style: normal;
-  font-size: var(--fs-cap);
-  font-weight: 400;
-  margin-left: 3px;
-  color: rgba(255, 255, 255, 0.7);
-}
-.theme__body {
-  padding: var(--sp-5);
   display: flex;
   flex-direction: column;
   gap: var(--sp-3);
-  flex: 1;
+  text-align: left;
+  padding: var(--sp-5) var(--sp-5) var(--sp-6);
+  background: #fff;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--r-lg);
+  cursor: pointer;
+  overflow: hidden;
+  transition: transform var(--dur-2) var(--ease), box-shadow var(--dur-2) var(--ease),
+    border-color var(--dur-2) var(--ease);
 }
-.theme__title {
+.cat:hover {
+  transform: translateY(-3px);
+  box-shadow: var(--sh-2);
+  border-color: var(--line);
+}
+.cat--on {
+  border-color: var(--brand-600);
+  box-shadow: var(--sh-brand);
+}
+.cat__top {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--sp-3);
+}
+.cat__label {
   font-family: var(--font-display);
-  font-size: 22px;
+  font-size: 24px;
+  color: var(--ink-900);
+  letter-spacing: 0.04em;
 }
-.theme--on .theme__title {
+.cat--on .cat__label {
   color: var(--brand-700);
 }
-.theme__desc {
-  font-size: var(--fs-sm);
-  line-height: 1.75;
+.cat__n {
+  font-size: 22px;
+  font-weight: 600;
+  color: var(--warm-400);
+  line-height: 1;
+}
+.cat--on .cat__n {
+  color: var(--gold-600);
+}
+.cat__desc {
+  font-size: var(--fs-xs);
+  line-height: 1.7;
   color: var(--ink-500);
-  flex: 1;
 }
-.theme__go {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-size: var(--fs-sm);
-  color: var(--brand-600);
-  font-weight: 500;
-}
-.theme__arrow {
-  font-style: normal;
-  transition: transform var(--dur-2) var(--ease);
-}
-.theme:hover .theme__arrow {
-  transform: translateX(4px);
-}
-/* 选中的主题在底部拉一条金线，和 tabs 的选中样式呼应 */
-.theme__rule {
+/* 选中的类别在底部拉一条金线：和主题 chip 的选中态呼应，但层级更高 */
+.cat__rule {
   position: absolute;
   left: 0;
   right: 0;
   bottom: 0;
-  height: 2px;
+  height: 3px;
   background: var(--gold-500);
   transform: scaleX(0);
   transform-origin: left;
   transition: transform var(--dur-3) var(--ease);
 }
-.theme--on .theme__rule {
+.cat--on .cat__rule {
   transform: scaleX(1);
 }
 
-/* ============ 4. 主推 + 精选（刻意 1.32fr : 1fr 不对称） ============ */
+/* ============ 4. 工具栏（二级主题 + 三级区县/关键词） ============ */
+.toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-5);
+  flex-wrap: wrap;
+  padding: var(--sp-4) 0;
+  border-top: 1px solid var(--line-soft);
+  border-bottom: 1px solid var(--line-soft);
+}
+.toolbar__left {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  flex-wrap: wrap;
+}
+.toolbar__k {
+  font-size: var(--fs-cap);
+  letter-spacing: 0.14em;
+  color: var(--warm-500);
+}
+.chips {
+  display: flex;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+}
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px var(--sp-4);
+  font-size: var(--fs-sm);
+  color: var(--ink-500);
+  border: 1px solid transparent;
+  border-radius: var(--r-pill);
+  transition: all var(--dur-1) var(--ease);
+}
+.chip:hover {
+  color: var(--brand-700);
+  background: var(--brand-50);
+}
+.chip--on {
+  color: var(--brand-800);
+  font-weight: 600;
+  background: var(--brand-50);
+  border-color: var(--brand-100);
+}
+.chip__n {
+  font-style: normal;
+  font-size: var(--fs-cap);
+  color: var(--warm-500);
+}
+.chip--on .chip__n {
+  color: var(--brand-500);
+}
+
+.toolbar__right {
+  display: flex;
+  gap: var(--sp-3);
+}
+.select,
+.input {
+  height: 38px;
+  padding: 0 var(--sp-3);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: #fff;
+  font-size: var(--fs-sm);
+  color: var(--ink-700);
+  transition: border-color var(--dur-1) var(--ease), box-shadow var(--dur-1) var(--ease);
+}
+.select:focus,
+.input:focus {
+  outline: none;
+  border-color: var(--brand-500);
+  box-shadow: 0 0 0 3px var(--brand-50);
+}
+.input {
+  width: 200px;
+}
+
+/* ============ 5. 主推 + 精选（刻意 1.32fr : 1fr 不对称） ============ */
 .feat__grid {
   display: grid;
   grid-template-columns: 1.32fr 1fr;
@@ -871,77 +964,7 @@ function scrollToGrid() {
   color: var(--gold-600);
 }
 
-/* ============ 5. 筛选 + 列表 ============ */
-.toolbar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--sp-4);
-  flex-wrap: wrap;
-  padding-bottom: var(--sp-5);
-  border-bottom: 1px solid var(--line-soft);
-  margin-bottom: var(--sp-6);
-}
-.tabs {
-  display: flex;
-  gap: var(--sp-1);
-  flex-wrap: wrap;
-}
-.tabs__item {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 7px var(--sp-4);
-  font-size: var(--fs-sm);
-  color: var(--ink-500);
-  border: 1px solid transparent;
-  border-radius: var(--r-pill);
-  transition: all var(--dur-1) var(--ease);
-}
-.tabs__item:hover {
-  color: var(--brand-700);
-  background: var(--brand-50);
-}
-.tabs__item--on {
-  color: var(--brand-800);
-  font-weight: 600;
-  background: var(--brand-50);
-  border-color: var(--brand-100);
-}
-.tabs__n {
-  font-style: normal;
-  font-size: var(--fs-cap);
-  color: var(--warm-500);
-}
-.tabs__item--on .tabs__n {
-  color: var(--brand-500);
-}
-
-.toolbar__right {
-  display: flex;
-  gap: var(--sp-3);
-}
-.select,
-.input {
-  height: 38px;
-  padding: 0 var(--sp-3);
-  border: 1px solid var(--line);
-  border-radius: var(--r-md);
-  background: #fff;
-  font-size: var(--fs-sm);
-  color: var(--ink-700);
-  transition: border-color var(--dur-1) var(--ease), box-shadow var(--dur-1) var(--ease);
-}
-.select:focus,
-.input:focus {
-  outline: none;
-  border-color: var(--brand-500);
-  box-shadow: 0 0 0 3px var(--brand-50);
-}
-.input {
-  width: 200px;
-}
-
+/* ============ 6. 列表 ============ */
 .result-count {
   display: flex;
   align-items: baseline;
@@ -1128,93 +1151,36 @@ function scrollToGrid() {
   gap: var(--sp-3);
 }
 
-/* ============ 6. 乡村好物 ============ */
-.goods {
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: var(--sp-6);
-}
-/* 用顶边金线代替卡片背景：和上面那一片 pcard 网格区分开，
-   避免整页变成"卡片墙"（首页的 gcard 也是同一手法） */
-.good {
+/* ============ 7. 离境复购入口 ============ */
+.exit {
   display: flex;
-  flex-direction: column;
-  gap: var(--sp-3);
-  padding-top: var(--sp-5);
-  border-top: 2px solid var(--gold-500);
-  transition: border-color var(--dur-2) var(--ease);
-}
-.good:hover {
-  border-color: var(--brand-600);
-}
-.good__top {
-  display: flex;
-  align-items: baseline;
+  align-items: center;
   justify-content: space-between;
-  gap: var(--sp-3);
+  gap: var(--sp-7);
+  padding: var(--sp-7);
+  background: var(--brand-800);
+  border-radius: var(--r-lg);
+  flex-wrap: wrap;
 }
-.good__price {
-  font-size: 20px;
-  font-weight: 700;
-  color: var(--gold-600);
+.exit__body {
+  max-width: 620px;
 }
-.good__name {
-  font-family: var(--font-display);
-  font-size: 18px;
-  line-height: 1.4;
-  transition: color var(--dur-1) var(--ease);
+.exit__title {
+  margin-top: var(--sp-3);
+  color: #fff;
 }
-.good:hover .good__name {
-  color: var(--brand-700);
-}
-.good__spec {
-  font-size: var(--fs-cap);
-  color: var(--warm-500);
-}
-.good__story {
+.exit__desc {
+  margin-top: var(--sp-4);
   font-size: var(--fs-sm);
-  line-height: 1.75;
-  color: var(--ink-500);
-  display: -webkit-box;
-  -webkit-line-clamp: 3;
-  line-clamp: 3;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
+  line-height: 1.85;
+  color: var(--brand-300);
 }
-.good__exp {
-  margin-top: auto;
-  padding-top: var(--sp-3);
-  border-top: 1px solid var(--line-soft);
-  font-size: var(--fs-cap);
-  line-height: 1.6;
-  color: var(--brand-600);
-}
-.good__exp-k {
-  font-style: normal;
-  font-weight: 600;
-  margin-right: 6px;
-  color: var(--brand-500);
+.exit__btn {
+  flex: none;
 }
 
 /* ============ 响应式 ============ */
 @media (max-width: 1080px) {
-  .themes {
-    grid-template-columns: 1fr;
-  }
-  .goods {
-    grid-template-columns: repeat(2, 1fr);
-    gap: var(--sp-5);
-  }
-  .theme {
-    flex-direction: row;
-  }
-  .theme__art {
-    width: 240px;
-    flex: none;
-  }
-  .theme__body {
-    justify-content: center;
-  }
   .feat__grid {
     grid-template-columns: 1fr;
   }
@@ -1228,9 +1194,6 @@ function scrollToGrid() {
 }
 
 @media (max-width: 720px) {
-  .goods {
-    grid-template-columns: 1fr;
-  }
   .exbanner {
     min-height: auto;
     padding: var(--sp-8) 0 var(--sp-7);
@@ -1242,17 +1205,9 @@ function scrollToGrid() {
   .exstats__i dd {
     font-size: 24px;
   }
-  .theme {
+  .toolbar {
+    align-items: flex-start;
     flex-direction: column;
-  }
-  .theme__art {
-    width: 100%;
-  }
-  .feat__body {
-    padding: var(--sp-5) var(--sp-5) var(--sp-6);
-  }
-  .pick {
-    grid-template-columns: 96px 1fr;
   }
   .toolbar__right {
     width: 100%;
@@ -1260,6 +1215,19 @@ function scrollToGrid() {
   .input {
     flex: 1;
     width: auto;
+  }
+  .feat__body {
+    padding: var(--sp-5) var(--sp-5) var(--sp-6);
+  }
+  .pick {
+    grid-template-columns: 96px 1fr;
+  }
+  .exit {
+    padding: var(--sp-5);
+  }
+  .exit__btn {
+    width: 100%;
+    justify-content: center;
   }
 }
 </style>

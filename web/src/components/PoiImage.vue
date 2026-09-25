@@ -17,15 +17,7 @@
 import { computed, ref, watch } from 'vue'
 import SceneArt from './SceneArt.vue'
 import { useCovers } from '@/composables/useCovers'
-
-type Variant =
-  | 'qinling'
-  | 'terrace'
-  | 'rapeseed'
-  | 'ancient'
-  | 'river'
-  | 'hanjiang'
-  | 'hantai'
+import { sceneVariant } from '@/utils/scene'
 
 const props = withDefaults(
   defineProps<{
@@ -63,8 +55,12 @@ watch(url, () => {
 
 const showPhoto = computed(() => !!url.value && !broken.value)
 
-/** SceneArt 的 variant 只认那 7 个值，数据包里没写 scene 时给个默认 */
-const variant = computed<Variant>(() => (props.scene as Variant) || 'qinling')
+/**
+ * SceneArt 的 variant 只认那 7 个值，数据包里没写 scene（或写了别的东西）时
+ * 由 `sceneVariant()` 归一化到默认值 —— 不再用 `as` 硬转，
+ * 硬转在遇到非法值时会让模板静默落到最后一个分支，画错场景还不报错。
+ */
+const variant = computed(() => sceneVariant(props.scene))
 
 const boxStyle = computed(() =>
   props.ratio && props.ratio !== 'auto' ? { aspectRatio: props.ratio } : undefined

@@ -41,18 +41,15 @@ import {
 } from '@/api/media'
 import { ApiError } from '@/api/http'
 import { reloadCovers } from '@/composables/useCovers'
+import { SCENE_LABELS, SCENE_VARIANTS } from '@/utils/scene'
 import { BUSINESS_LABEL, type Poi, type PoiImage as PoiImageRow, type SiteBanner } from '@/types'
 
-/** 手写 SVG 的 7 个变体。新建帧时选一个当"没传图时的兜底画面" */
-const SCENES: { value: string; label: string }[] = [
-  { value: 'qinling', label: '秦岭云海' },
-  { value: 'terrace', label: '茶园梯田' },
-  { value: 'rapeseed', label: '油菜花田' },
-  { value: 'ancient', label: '古建街巷' },
-  { value: 'river', label: '溪流山谷' },
-  { value: 'hanjiang', label: '汉江水面' },
-  { value: 'hantai', label: '汉台春色' },
-]
+/**
+ * 手写 SVG 的变体清单，供"新建帧时选一个兜底画面"用。
+ * 直接从 `@/utils/scene` 生成而不是在这里再抄一份 ——
+ * 抄一份的话，将来加了新变体、这里忘了加，下拉框里就会缺一项。
+ */
+const SCENES = SCENE_VARIANTS.map((value) => ({ value, label: SCENE_LABELS[value] }))
 
 const tab = ref<'banner' | 'poi'>('banner')
 const busy = ref(false)

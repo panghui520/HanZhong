@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import type { SceneVariant } from '@/utils/scene'
+
 /**
  * SceneArt —— 场景插画
  * 全部为手写 SVG，无外链图片：离线可演示、无版权问题、风格统一。
@@ -9,14 +11,12 @@
  */
 const props = withDefaults(
   defineProps<{
-    variant?:
-      | 'qinling'
-      | 'terrace'
-      | 'rapeseed'
-      | 'ancient'
-      | 'river'
-      | 'hanjiang'
-      | 'hantai'
+    /**
+     * 场景变体。类型来自 `@/utils/scene`，与下面 `<g v-if>` 的分支一一对应。
+     * 数据驱动的调用方（产品卡等）请先过一遍 `sceneVariant()` 归一化，
+     * 不要直接传 `string` —— 拼错的值会静默落到最后一个 `v-else` 分支。
+     */
+    variant?: SceneVariant
     ratio?: string
     tone?: 'light' | 'deep'
   }>(),
