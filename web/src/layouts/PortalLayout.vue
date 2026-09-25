@@ -2,6 +2,7 @@
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useCartStore } from '@/stores/cart'
+import { useOrderStore } from '@/stores/order'
 import { useSessionStore } from '@/stores/session'
 
 const scrolled = ref(false)
@@ -19,20 +20,30 @@ onUnmounted(() => {
 
 const session = useSessionStore()
 const cart = useCartStore()
+const order = useOrderStore()
 const router = useRouter()
 const route = useRoute()
 
 /**
- * 购物车角标（M6）。
+ * 顶栏两个角标（M6）：购物车件数、待处理订单数。
  *
  * 两处要刷新：应用启动时拉一次、登录态变化时再拉一次。
  * 退出登录必须清掉 —— 否则下一个人登录时会看到上一个人的角标数字。
- * 加购之后由触发方（Goods / Cart）主动调 `cart.refresh()`，
- * 这里不再 watch 路由，避免每次跳转都打一次接口。
+ * 加购 / 下单 / 付款这些动作之后由**触发方**主动调 `refresh()`
+ * （Goods、Cart、Orders、OrderDetail 都调了），这里不再 watch 路由，
+ * 避免每次跳转都打两个接口。
  */
 watch(
   () => session.isLoggedIn,
-  (v) => (v ? cart.refresh() : cart.reset()),
+  (v) => {
+    if (v) {
+      void cart.refresh()
+      void order.refresh()
+    } else {
+      cart.reset()
+      order.reset()
+    }
+  },
   { immediate: true }
 )
 
@@ -110,6 +121,46 @@ async function logout() {
         </nav>
 
         <div class="nav__actions">
+          <!--
+            我的订单入口（M6）。提到一级导航而不是只放在用户下拉菜单里：
+            下单后用户最需要的是"去哪付款 / 我的货到哪了"，那两件事都要
+            先进订单页。埋在下拉菜单里等于让他先猜一次。
+
+            **有需要处理的订单时变金色实心**（待付款 / 待收货），
+            没有时是普通描边 —— 常态下不抢视觉，有事时一眼能看到。
+            数字来自服务端 /api/orders/count，不在本地猜。
+          -->
+          <router-link
+            v-if="session.isLoggedIn"
+            to="/orders"
+            class="nav__orders"
+            :class="{ 'nav__orders--todo': order.pending > 0 }"
+            :title="
+              order.pending > 0
+                ? `我的订单 · ${order.pending} 单待处理`
+                : `我的订单 · 共 ${order.total} 单`
+            "
+          >
+            <svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true">
+              <path
+                d="M6 3.2h12a1 1 0 0 1 1 1v15.6a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V4.2a1 1 0 0 1 1-1Z"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.7"
+                stroke-linejoin="round"
+              />
+              <path
+                d="M8.4 8h7.2M8.4 12h7.2M8.4 16h4"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.7"
+                stroke-linecap="round"
+              />
+            </svg>
+            <span class="nav__orders-label">我的订单</span>
+            <span v-if="order.pending > 0" class="nav__orders-n num">{{ order.pending }}</span>
+          </router-link>
+
           <!--
             购物车入口（M6）。只在登录后显示：
             未登录时点进去也只是一个"请登录"的空壳，不如先让他看到登录入口。
@@ -449,6 +500,77 @@ async function logout() {
   border-color: rgba(255, 255, 255, 0.6);
 }
 
+/* ---------- 我的订单入口（M6） ---------- */
+.nav__orders {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 34px;
+  padding: 0 var(--sp-3);
+  font-size: var(--fs-xs);
+  color: var(--ink-700);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  transition: all var(--dur-1) var(--ease);
+}
+.nav__orders:hover {
+  color: var(--brand-700);
+  border-color: var(--brand-300);
+  background: var(--brand-50);
+}
+.nav__orders-label {
+  font-weight: 500;
+}
+/*
+  有需要处理的订单时才变金色实心。
+  这样它平时不抢购物车的视觉，而一旦有待付款 / 待收货的单，
+  在整条顶栏里是唯一的实心块 —— 用户扫一眼就知道有事要做。
+*/
+.nav__orders--todo {
+  color: #3a2a0c;
+  background: var(--gold-300);
+  border-color: var(--gold-500);
+  font-weight: 600;
+}
+.nav__orders--todo:hover {
+  color: #2b1f09;
+  background: var(--gold-500);
+  border-color: var(--gold-500);
+}
+/* 金色底上的角标要反过来用深色，否则金压金看不出边界 */
+.nav__orders-n {
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  display: inline-grid;
+  place-items: center;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--gold-300);
+  background: var(--brand-800);
+  border-radius: var(--r-pill);
+  line-height: 1;
+}
+.nav--over .nav__orders {
+  color: rgba(255, 255, 255, 0.9);
+  border-color: rgba(255, 255, 255, 0.28);
+}
+.nav--over .nav__orders:hover {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.14);
+  border-color: rgba(255, 255, 255, 0.6);
+}
+/* 压在 Hero 上时保持金色实心：那时顶栏是透明的，描边款几乎看不见 */
+.nav--over .nav__orders--todo {
+  color: #3a2a0c;
+  background: var(--gold-300);
+  border-color: var(--gold-500);
+}
+.nav--over .nav__orders--todo:hover {
+  background: var(--gold-500);
+}
+
 /* ---------- 登录入口 ---------- */
 .nav__login {
   display: inline-flex;
@@ -609,8 +731,9 @@ async function logout() {
 }
 
 @media (max-width: 1080px) {
-  /* 顶栏塞不下这么多字了，购物车只留图标 + 角标 */
-  .nav__cart-label {
+  /* 顶栏塞不下这么多字了，购物车与我的订单只留图标 + 角标 */
+  .nav__cart-label,
+  .nav__orders-label {
     display: none;
   }
 }
