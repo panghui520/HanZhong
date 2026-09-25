@@ -33,7 +33,7 @@
 |---|---|
 | M1 统一资源（POI / 区县 / 知识） | ✅ 已验收 |
 | M2 乡村体验与农产品 | ✅ 已验收 |
-| M3 文旅知识问答（FastAPI + RAG） | 🟡 功能可用，验收记录待补 |
+| M3 文旅知识问答（FastAPI + RAG） | ✅ 已验收（含真实模型联调：DeepSeek 对话 + 硅基流动 BAAI/bge-m3 嵌入） |
 | M4 行程规划 | ⬜ 未开始 |
 | M5 承载力与分流 | ⬜ 未开始 |
 | M6 消费与离境复购 | ✅ 离境复购链已验收（两轮：两态闭环 + 七态订单流转）；到访消费链未做 |
@@ -76,6 +76,35 @@
 | `scripts/` | 数据生成、导入、评测、压测 | Python |
 | `deploy/` | 一键部署 | Docker Compose |
 | `docs/` | 比赛文档 + 设计文档 + 评测报告 | Markdown |
+
+## 本地启动
+
+```bash
+# 1. 配置凭证（模板见 .env.example）
+cp .env.example .env
+#   然后在 .env 里填两个 key（两者不通用，是两家厂商）：
+#     LLM_API_KEY            对话模型（DeepSeek）
+#     LLM_EMBEDDING_API_KEY  嵌入模型（硅基流动）
+
+# 2. 构建知识库（M3 用）。换嵌入模型或改别名表后必须重跑
+python scripts/build_kb.py --api
+
+# 3. 起 AI 服务（无状态、不连业务库）
+cd server-ai && .venv/Scripts/python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+
+# 4. 起业务后端与前端
+cd server-java && mvn spring-boot:run      # 8080
+cd web && npm run dev                      # 5173
+```
+
+⚠️ **`.env` 只被 Python 读**（Java 的 `application.yml` 读系统环境变量）。
+在里面改 `INTERNAL_TOKEN` 会让两边不一致，`/api/ai/**` 全部返回 `3001`。
+
+⚠️ **用 `server-ai/.venv/` 里的 Python**。托管/系统 Python 可能没装 `python-dotenv`，
+表现为"填了 `.env` 但配置全是默认值、零报错"（已加一次性警告堵住这个坑）。
+
+检索效果自检：`python scripts/eval_retrieval.py`
+（26 条正例 + 10 条反例 + 5 条推荐问题，**任一指标不达标退出码 1**）。
 
 ## 数据合规
 
