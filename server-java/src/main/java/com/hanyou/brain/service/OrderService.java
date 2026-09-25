@@ -4,6 +4,7 @@ import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ThreadLocalRandom;
@@ -16,28 +17,67 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
 
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.hanyou.brain.common.BizException;
 import com.hanyou.brain.common.ErrorCode;
 import com.hanyou.brain.entity.AppUser;
 import com.hanyou.brain.entity.CartItem;
 import com.hanyou.brain.entity.Order;
 import com.hanyou.brain.entity.OrderItem;
+import com.hanyou.brain.entity.OrderReview;
 import com.hanyou.brain.mapper.AppUserMapper;
 import com.hanyou.brain.mapper.CartItemMapper;
 import com.hanyou.brain.mapper.OrderItemMapper;
 import com.hanyou.brain.mapper.OrderMapper;
+import com.hanyou.brain.mapper.OrderReviewMapper;
+import com.hanyou.brain.media.MediaStorageService;
 import com.hanyou.brain.vo.CartItemVO;
+import com.hanyou.brain.vo.OrderCountVO;
 import com.hanyou.brain.vo.OrderItemVO;
+import com.hanyou.brain.vo.OrderReviewVO;
 import com.hanyou.brain.vo.OrderVO;
 import com.hanyou.brain.vo.ProductVO;
 
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 
 /**
- * M6 消费与离境复购：购物车 + 订单。
+ * M6 消费与离境复购：购物车 + 订单全流程。
  *
- * <p>本轮只做「加购 → 填收货信息 → 下单 → 运营发货」这一段，
- * 不做支付、不做物流、不做取消退款（理由见 db/V5__m6_order.sql 顶部）。
+ * <p><b>订单状态机（本类的核心）：</b>
+ *
+ * <pre>
+ *   下单
+ *    │
+ *    ▼
+ * PENDING_PAYMENT 待付款 ──30 分钟未付──▶ CANCELLED 已取消（超时）
+ *    │
+ *    ├─ 用户主动取消 ────────────────────▶ CANCELLED 已取消（用户）
+ *    │
+ *    │ 付款
+ *    ▼
+ * PENDING_SHIPMENT 待发货
+ *    │
+ *    │ 运营发货（必须填快递公司 / 预计天数 / 快递单号）
+ *    ▼
+ *  SHIPPED 已发货 ────────────────────▶ REFUND_REQUESTED 退款中
+ *    │ 用户确认收货                          │
+ *    ▼                                       ├─ 管理员同意 ─▶ REFUNDED 已退款（终态）
+ * COMPLETED 已完成                           └─ 管理员拒绝 ─▶ 退回申请前的状态
+ *    │ 评价（星级 + 文字 + 图片）
+ *    ▼
+ *  order_review
+ * </pre>
+ *
+ * <p><b>能申请退款的是 PENDING_SHIPMENT 与 SHIPPED 两个状态。</b>
+ * 待付款还没付过钱，取消即可，谈不上"退"；已完成、已取消、已退款都是终态。
+ * 已发货之后的退款必须由管理员同意 —— 货已经在路上，买家单方面退对商家不公平，
+ * 这也是真实电商的通行做法。
+ *
+ * <p><b>支付与物流都是演示级的：</b>没有接真实支付通道（"付款"就是一个按钮），
+ * 物流信息由运营手工填写、系统不去查快递接口。这一点在验收记录里写明了，
+ * 答辩时不要含糊成"我们做了支付"—— 那会被追问到通道、对账和退款资金流。
  *
  * <p><b>三条贯穿本类的原则：</b>
  *
@@ -52,13 +92,49 @@ import lombok.RequiredArgsConstructor;
  * 重灌，扣减会在重启后失效。本轮只校验库存是否充足，不扣。详见 V5 脚本顶部说明。
  */
 @Service
+@Slf4j
 @RequiredArgsConstructor
 public class OrderService {
 
-    /** 待发货：用户提交后的初始状态 */
-    private static final String STATUS_PENDING = "PENDING";
-    /** 已发货：运营点一下「标记已发货」 */
+    // ==================================================================
+    // 订单状态
+    //
+    // 取值必须与 db/V6__m6_order_flow.sql 里 status 列的注释保持一致。
+    // 加状态时两处一起改 —— 注释和代码对不上，下一个人就会按错的注释写逻辑。
+    // ==================================================================
+
+    /** 待付款：下单后的初始状态。30 分钟内不付款就自动取消 */
+    private static final String STATUS_PENDING_PAYMENT = "PENDING_PAYMENT";
+    /** 待发货：已付款，等运营发货 */
+    private static final String STATUS_PENDING_SHIPMENT = "PENDING_SHIPMENT";
+    /** 已发货：运营已填写物流信息 */
     private static final String STATUS_SHIPPED = "SHIPPED";
+    /** 已完成：用户确认收货。终态 */
+    private static final String STATUS_COMPLETED = "COMPLETED";
+    /** 已取消：超时未付或用户主动取消。终态 */
+    private static final String STATUS_CANCELLED = "CANCELLED";
+    /** 退款中：用户已申请，等管理员处理 */
+    private static final String STATUS_REFUND_REQUESTED = "REFUND_REQUESTED";
+    /** 已退款：管理员同意退款。终态 */
+    private static final String STATUS_REFUNDED = "REFUNDED";
+
+    /**
+     * 支付时限。
+     *
+     * <p>30 分钟是常见电商的默认值：太短用户来不及（尤其还要去翻银行卡），
+     * 太长则等于把商品无限期替人占着。做成常量而不是散在代码里的字面量，
+     * 是因为它同时出现在"下单时算截止时刻"和"定时任务判断过期"两处，
+     * 写两个 30 迟早会改漏一处。
+     */
+    private static final int PAY_WINDOW_MINUTES = 30;
+
+    /** 取消原因：超时未付，系统自动取消 */
+    private static final String CANCEL_TIMEOUT = "TIMEOUT";
+    /** 取消原因：用户自己点的取消 */
+    private static final String CANCEL_USER = "USER";
+
+    /** 评价最多 3 张图。再多就不像评价、像相册了，也没有哪个运营会去看 */
+    private static final int MAX_REVIEW_IMAGES = 3;
 
     /** 离境复购。本轮所有订单都走这个渠道，TRIP 那一侧等 M6 完整版 */
     private static final String CHANNEL_REPURCHASE = "REPURCHASE";
@@ -87,6 +163,17 @@ public class OrderService {
      * 为了一个查询去依赖整个认证服务不划算。
      */
     private final AppUserMapper appUserMapper;
+
+    /** 订单评价。一单一评，唯一键在库里 */
+    private final OrderReviewMapper orderReviewMapper;
+
+    /**
+     * 评价图片在库里存成 JSON 数组字符串，进出各序列化一次。
+     *
+     * <p>用 Spring 容器里那个（全局配了 snake_case），而不是 new 一个：
+     * 这样库里存的格式和项目其它地方一致，也不会多出一份配置。
+     */
+    private final ObjectMapper objectMapper;
 
     // ==================================================================
     // 购物车
@@ -192,6 +279,10 @@ public class OrderService {
      *
      * <p>三步必须同成同败。若明细写完、清车失败，用户会看到"购物车还在、
      * 订单也生成了"，重复下单的概率极高。
+     *
+     * <p><b>下单后的状态是「待付款」，不是「待发货」。</b>用户付了款
+     * （见 {@link #payOrder}）才进入待发货。所以"下单成功"的提示语
+     * 不该写成"我们会尽快发货"—— 那时还没付钱。
      */
     @Transactional(rollbackFor = Exception.class)
     public OrderVO createOrder(Long userId, String receiverName, String receiverPhone,
@@ -252,7 +343,12 @@ public class OrderService {
         Order order = new Order();
         order.setOrderNo(nextOrderNo());
         order.setUserId(userId);
-        order.setStatus(STATUS_PENDING);
+        // ★ 下单后先是「待付款」，不是「待发货」。
+        // 用户点一下付款按钮之后才进入待发货 —— 见 payOrder。
+        order.setStatus(STATUS_PENDING_PAYMENT);
+        // 支付截止时刻写进库，而不是靠前端倒计时：
+        // 前端刷新、关页面、换设备都不影响它，定时任务也只认这一列。
+        order.setPayDeadline(LocalDateTime.now().plusMinutes(PAY_WINDOW_MINUTES));
         order.setItemCount(itemCount);
         order.setTotalAmount(total);
         order.setReceiverName(name);
@@ -275,7 +371,7 @@ public class OrderService {
         // 时间戳由数据库默认值（CURRENT_TIMESTAMP）生成，内存对象里是 null ——
         // 不回读的话，下单响应里 created_at 会整个缺失（全局 non_null 序列化），
         // 前端拿到的订单对象比列表接口少两个字段。
-        return attachItems(List.of(orderMapper.selectById(order.getId())), Map.of()).get(0);
+        return attachItems(List.of(orderMapper.selectById(order.getId())), Map.of(), false).get(0);
     }
 
     /** 我的订单（含明细）。订单量不大，一次带全，省掉详情页的二次请求 */
@@ -285,7 +381,7 @@ public class OrderService {
                         .eq(Order::getUserId, userId)
                         .orderByDesc(Order::getCreatedAt)
                         .orderByDesc(Order::getId));
-        return attachItems(orders, Map.of());
+        return attachItems(orders, Map.of(), false);
     }
 
     /** 订单详情。只能看自己的 —— 传别人的 id 得到 6005，不是 4003（不泄漏"这个单号存在"） */
@@ -294,22 +390,227 @@ public class OrderService {
         if (o == null || !o.getUserId().equals(userId)) {
             throw new BizException(ErrorCode.ORDER_NOT_FOUND);
         }
-        return attachItems(List.of(o), Map.of()).get(0);
+        return attachItems(List.of(o), Map.of(), false).get(0);
+    }
+
+    /**
+     * 我的订单计数（顶栏角标用）。
+     *
+     * <p>只查 status 一列，不查整行、更不带明细：顶栏每次登录态变化都要调一次，
+     * 走的是最高频的路径。用 {@code selectCount} 让它落成
+     * {@code SELECT COUNT(*) ... WHERE user_id = ? AND status IN (...)}，
+     * 两个计数都靠 {@code idx_user_created(user_id, created_at)} 的最左前缀
+     * user_id 定位（orders 上没有 user_id + status 的联合索引，
+     * 但对单个用户的几十单来说，先按 user_id 缩到几十行再过滤 status 已经够了）。
+     *
+     * <p>{@code pending} 的口径是"**需要用户动手**"：待付款（要付钱）、
+     * 已发货（要确认收货）。刻意**不含**已完成 —— 已完成的订单用户无事可做，
+     * 算进角标会让角标只增不减，变成一个永远消不掉的红点，
+     * 用户很快就不再看它了。退款中也不含：那在等运营处理，不是等用户。
+     */
+    public OrderCountVO countMyOrders(Long userId) {
+        Long total = orderMapper.selectCount(
+                Wrappers.<Order>lambdaQuery().eq(Order::getUserId, userId));
+        Long pending = orderMapper.selectCount(
+                Wrappers.<Order>lambdaQuery()
+                        .eq(Order::getUserId, userId)
+                        .in(Order::getStatus, STATUS_PENDING_PAYMENT, STATUS_SHIPPED));
+        OrderCountVO vo = new OrderCountVO();
+        vo.setTotal(total == null ? 0 : total.intValue());
+        vo.setPending(pending == null ? 0 : pending.intValue());
+        return vo;
+    }
+
+    // ==================================================================
+    // 订单状态流转（用户端）
+    //
+    // 每个方法都是同一套写法：取订单 -> 校验"当前状态允不允许这个动作"
+    // -> 改状态与时间戳 -> 回读一次再返回。
+    //
+    // 为什么每个动作都要显式校验当前状态，而不是"改完再看结果"：
+    // 状态机有 7 个状态之后，任意两个动作都可能被并发穿插
+    // （用户点"确认收货"的同时点了"申请退款"）。把校验放在改之前，
+    // 第二个请求会因为状态已经不匹配而被拒，而不是把状态覆盖成错的。
+    // ==================================================================
+
+    /**
+     * 付款（演示级：不接真实支付通道，就是用户点一下按钮）。
+     *
+     * <p>为什么"下单"和"付款"要拆成两步，而不是下单即已付款：
+     * 真实电商里这就是两个动作，中间那段时间正是"超时取消"存在的理由。
+     * 合并成一步，待付款这个状态就没有落脚点了，30 分钟倒计时也无从谈起。
+     *
+     * <p><b>本方法刻意不加 {@code @Transactional}。</b>因为下面那条
+     * "过期了顺手改成已取消、然后报错"的分支，需要在抛异常之后**仍然保留**
+     * 已写入的状态 —— 若被事务包着，抛异常会把这次写入一起回滚，
+     * 结果就是"提示已超时、刷新还是待付款"，用户会反复点付款。
+     * 单步写入本来也不需要事务；让它在没有外层事务的情况下被调用，
+     * 提交才是真的提交（这个坑 M8 踩过一次，见认证模块的验收记录）。
+     */
+    public OrderVO payOrder(Long userId, Long orderId) {
+        Order o = requireOwnOrder(userId, orderId);
+        if (!STATUS_PENDING_PAYMENT.equals(o.getStatus())) {
+            throw new BizException(ErrorCode.ORDER_STATUS_INVALID,
+                    "这笔订单不需要付款了，当前是「" + statusLabel(o.getStatus()) + "」");
+        }
+        // 定时任务每分钟才扫一次，这一单可能已经过期但还没被扫到。
+        // 不能只报错不改状态：那样用户会一直看到"待付款"、反复点付款、每次都失败。
+        if (o.getPayDeadline() != null && o.getPayDeadline().isBefore(LocalDateTime.now())) {
+            o.setStatus(STATUS_CANCELLED);
+            o.setCancelledAt(LocalDateTime.now());
+            o.setCancelReason(CANCEL_TIMEOUT);
+            orderMapper.updateById(o);
+            throw new BizException(ErrorCode.ORDER_PAY_EXPIRED);
+        }
+        o.setStatus(STATUS_PENDING_SHIPMENT);
+        o.setPaidAt(LocalDateTime.now());
+        orderMapper.updateById(o);
+        return reloadAsUser(orderId);
+    }
+
+    /**
+     * 取消订单（用户主动）。
+     *
+     * <p>只有待付款能直接取消。已付款的订单必须走退款流程 —— 这是刻意的：
+     * "取消"不涉及钱，而付过款的订单取消就意味着退钱，那是另一条要管理员
+     * 处理的流程。把两者合成一个按钮，用户会以为点了就退钱了。
+     */
+    public OrderVO cancelOrder(Long userId, Long orderId) {
+        Order o = requireOwnOrder(userId, orderId);
+        if (!STATUS_PENDING_PAYMENT.equals(o.getStatus())) {
+            throw new BizException(ErrorCode.ORDER_STATUS_INVALID,
+                    "只有「待付款」的订单能直接取消，当前是「" + statusLabel(o.getStatus())
+                            + "」。已付款的订单请申请退款");
+        }
+        o.setStatus(STATUS_CANCELLED);
+        o.setCancelledAt(LocalDateTime.now());
+        o.setCancelReason(CANCEL_USER);
+        orderMapper.updateById(o);
+        return reloadAsUser(orderId);
+    }
+
+    /**
+     * 确认收货。
+     *
+     * <p>只有已发货能确认。确认后进入已完成 —— 而"已完成"是评价的前置条件，
+     * 所以这一步不能省：没收到货就能评价等于刷评。
+     */
+    public OrderVO confirmReceipt(Long userId, Long orderId) {
+        Order o = requireOwnOrder(userId, orderId);
+        if (!STATUS_SHIPPED.equals(o.getStatus())) {
+            throw new BizException(ErrorCode.ORDER_STATUS_INVALID,
+                    "只有「已发货」的订单能确认收货，当前是「" + statusLabel(o.getStatus()) + "」");
+        }
+        o.setStatus(STATUS_COMPLETED);
+        o.setReceivedAt(LocalDateTime.now());
+        orderMapper.updateById(o);
+        return reloadAsUser(orderId);
+    }
+
+    /**
+     * 申请退款。
+     *
+     * <p>能申请的是「待发货」与「已发货」：前者钱付了货没发，后者货在路上。
+     * 待付款还没付过钱，取消即可；已完成 / 已取消 / 已退款都是终态。
+     *
+     * <p>申请时把当前状态记进 {@code statusBeforeRefund}，管理员拒绝时
+     * 订单要退回这里。不记下来就回不去了。
+     */
+    public OrderVO requestRefund(Long userId, Long orderId, String reason) {
+        String text = requireText(reason, 255);
+        Order o = requireOwnOrder(userId, orderId);
+        if (!STATUS_PENDING_SHIPMENT.equals(o.getStatus())
+                && !STATUS_SHIPPED.equals(o.getStatus())) {
+            throw new BizException(ErrorCode.ORDER_STATUS_INVALID,
+                    "当前状态（" + statusLabel(o.getStatus()) + "）不能申请退款");
+        }
+        // 用 UpdateWrapper 显式 set，而不是改实体再 updateById：
+        // MyBatis-Plus 的 updateById 默认**忽略 null 字段**，于是
+        // "重新申请退款时清掉上一次的拒绝理由"这个动作会静默失效，
+        // 页面上就会同时出现"退款中"和上次的拒绝理由，看着自相矛盾。
+        orderMapper.update(null, Wrappers.<Order>lambdaUpdate()
+                .eq(Order::getId, orderId)
+                .set(Order::getStatusBeforeRefund, o.getStatus())
+                .set(Order::getStatus, STATUS_REFUND_REQUESTED)
+                .set(Order::getRefundReason, text)
+                .set(Order::getRefundAt, LocalDateTime.now())
+                .set(Order::getRefundReply, null)
+                .set(Order::getRefundHandledAt, null));
+        return reloadAsUser(orderId);
+    }
+
+    /**
+     * 评价订单。
+     *
+     * <p>只有「已完成」能评价 —— 没收到货就评价是刷评，最基本的一条。
+     *
+     * <p>一单一评靠 {@code order_review.uk_order} 唯一键兜底。这里先查一次
+     * 只是为了给出友好的 6010，真正的防重是那个唯一键：两个请求同时通过
+     * 这里的检查时，数据库会拒绝第二个。
+     */
+    public OrderReviewVO createReview(Long userId, Long orderId, Integer rating,
+                                      String content, List<String> images) {
+        // ★ 先校验"这笔订单能不能评价"，再校验评价内容本身。顺序不能反：
+        // 对一笔还没完成的订单报"请写点评价内容"是答非所问 —— 用户会以为
+        // 是自己内容没填好，反复改文案，而真正的原因是这单还不能评。
+        // 实测踩到过（验收脚本第一轮把这条判成了失败）。
+        Order o = requireOwnOrder(userId, orderId);
+        if (!STATUS_COMPLETED.equals(o.getStatus())) {
+            throw new BizException(ErrorCode.ORDER_STATUS_INVALID,
+                    "只有已完成的订单能评价，当前是「" + statusLabel(o.getStatus()) + "」");
+        }
+
+        if (rating == null || rating < 1 || rating > 5) {
+            throw new BizException(ErrorCode.REVIEW_RATING_INVALID);
+        }
+        String text = StringUtils.hasText(content) ? truncate(content.trim(), 1000) : null;
+        List<String> imgs = normalizeImages(images);
+        if (text == null && imgs.isEmpty()) {
+            throw new BizException(ErrorCode.REVIEW_CONTENT_REQUIRED);
+        }
+
+        if (orderReviewMapper.selectCount(
+                Wrappers.<OrderReview>lambdaQuery().eq(OrderReview::getOrderId, orderId)) > 0) {
+            throw new BizException(ErrorCode.REVIEW_EXISTS);
+        }
+
+        OrderReview r = new OrderReview();
+        r.setOrderId(orderId);
+        r.setUserId(userId);
+        r.setRating(rating);
+        r.setContent(text);
+        r.setImages(imgs.isEmpty() ? null : toImagesJson(imgs));
+        orderReviewMapper.insert(r);
+        // 回读：id 与 created_at 都由数据库生成，内存对象里 created_at 是 null，
+        // 不回读的话响应里这个字段会整个缺失 —— 与下单那次是同一个坑。
+        return toReviewVO(orderReviewMapper.selectById(r.getId()));
     }
 
     // ==================================================================
     // 订单（运营端）
     // ==================================================================
 
-    /** 运营端订单列表。status 为空时返回全部，待发货的排在前面 */
+    /** 运营端订单列表。status 为空时返回全部，需要运营动手的排在前面 */
     public List<OrderVO> listAllOrders(String status) {
         var q = Wrappers.<Order>lambdaQuery();
         if (StringUtils.hasText(status)) {
             q.eq(Order::getStatus, status.trim().toUpperCase());
         }
-        // 待发货优先：运营进这个页面就是来处理待发货的，不该让他往下翻
-        q.orderByAsc(Order::getStatus).orderByDesc(Order::getCreatedAt).orderByDesc(Order::getId);
         List<Order> orders = orderMapper.selectList(q);
+
+        // ★ 排序必须在 Java 里显式表达，不能靠 orderByAsc(status) 的字母序。
+        //
+        // 旧实现是 `orderByAsc(Order::getStatus)`，注释写着"待发货优先" ——
+        // 它当时确实成立，但纯属巧合：状态只有 PENDING / SHIPPED 两个，
+        // 字母序里 P 在 S 前面，正好把待发货排到了前面。
+        // 现在状态变成 7 个，字母序是 CANCELLED, COMPLETED, PENDING_PAYMENT,
+        // PENDING_SHIPMENT, REFUNDED, REFUND_REQUESTED, SHIPPED ——
+        // 待发货掉到第 4 位，退款中也埋在下面，"优先"静默失效。
+        // 这种"靠数据取值碰巧成立"的排序，加一个枚举值就会坏掉，所以换成显式权重。
+        orders.sort(Comparator
+                .comparingInt((Order o) -> actionPriority(o.getStatus()))
+                .thenComparing(Order::getCreatedAt, Comparator.nullsLast(Comparator.reverseOrder()))
+                .thenComparing(Order::getId, Comparator.reverseOrder()));
 
         // 一次把涉及到的买家全查出来，不在循环里逐个查（同样是 N+1）
         List<Long> userIds = orders.stream().map(Order::getUserId).distinct().toList();
@@ -317,38 +618,121 @@ public class OrderService {
                 ? Map.of()
                 : appUserMapper.selectBatchIds(userIds).stream()
                         .collect(Collectors.toMap(AppUser::getId, Function.identity(), (a, b) -> a));
-        return attachItems(orders, users);
+        return attachItems(orders, users, true);
     }
 
     /**
-     * 标记已发货。
+     * 运营端排序权重：数字越小越靠前，越小也越"需要运营动手"。
      *
-     * <p>校验"当前必须是待发货"：重复点两次不该把 shipped_at 刷新成第二次的时间。
-     * 这不是理论问题 —— 运营端列表上按钮挨着，双击很常见。
+     * <p>待发货排第一（运营进这个页面主要就是来发货的），退款中排第二
+     * （用户等着答复），之后才是"在等别人动作"的状态，最后是终态。
      */
-    @Transactional(rollbackFor = Exception.class)
-    public OrderVO shipOrder(Long orderId) {
-        Order o = orderMapper.selectById(orderId);
-        if (o == null) {
-            throw new BizException(ErrorCode.ORDER_NOT_FOUND);
+    private static int actionPriority(String status) {
+        if (STATUS_PENDING_SHIPMENT.equals(status)) {
+            return 0;
         }
-        if (!STATUS_PENDING.equals(o.getStatus())) {
-            throw new BizException(ErrorCode.ORDER_STATUS_INVALID, "该订单已经是「已发货」状态");
+        if (STATUS_REFUND_REQUESTED.equals(status)) {
+            return 1;
+        }
+        if (STATUS_PENDING_PAYMENT.equals(status)) {
+            return 2;
+        }
+        if (STATUS_SHIPPED.equals(status)) {
+            return 3;
+        }
+        return 4;
+    }
+
+    /**
+     * 发货。必须填写快递公司、预计到达天数、快递单号三项。
+     *
+     * <p>为什么强制填全：这三项是买家那边唯一能看到的物流线索。允许留空的话，
+     * 运营图快会全部跳过，买家就只看到一个"已发货"，连去哪查都不知道 ——
+     * 那这条状态流转等于白做。
+     *
+     * <p>校验"当前必须是待发货"：重复点两次不该把 shipped_at 刷成第二次的时间，
+     * 也不该把第一次填的快递单号覆盖掉。运营端列表上按钮挨得很近，双击是常态。
+     */
+    public OrderVO shipOrder(Long orderId, String carrier, Integer etaDays, String trackingNo) {
+        String carrierText = requireShipInfo(carrier, 32, "快递公司");
+        String trackingText = requireShipInfo(trackingNo, 64, "快递单号");
+        if (etaDays == null || etaDays < 1 || etaDays > 60) {
+            throw new BizException(ErrorCode.SHIP_INFO_REQUIRED, "预计到达天数请填 1 到 60 之间");
+        }
+
+        Order o = requireOrder(orderId);
+        if (!STATUS_PENDING_SHIPMENT.equals(o.getStatus())) {
+            throw new BizException(ErrorCode.ORDER_STATUS_INVALID,
+                    "只有「待发货」的订单能发货，当前是「" + statusLabel(o.getStatus()) + "」");
         }
         o.setStatus(STATUS_SHIPPED);
+        o.setCarrier(carrierText);
+        o.setEtaDays(etaDays);
+        o.setTrackingNo(trackingText);
         o.setShippedAt(LocalDateTime.now());
         orderMapper.updateById(o);
+        return reloadAsAdmin(orderId);
+    }
 
-        // ★ 回读一次再返回。理由不只是"稳妥"，是一个真实踩到过的不一致：
-        // Java 的 LocalDateTime.now() 带纳秒，而 shipped_at 列是 DATETIME（无小数秒），
-        // MySQL 会四舍五入。不回读的话，发货接口返回 `...18:45:08.7085987`，
-        // 而用户随后刷新「我的订单」看到的是 `...18:45:09` —— 同一个字段两次读不一样。
-        // 前端目前只显示到分钟所以看不出来，但那是运气，不是设计。
-        Order saved = orderMapper.selectById(orderId);
+    /**
+     * 处理退款（运营端）：同意或拒绝。
+     *
+     * <p>拒绝时订单退回 {@code statusBeforeRefund} 记下的那个状态。
+     * 那一列若为空（历史数据、或有人手工改过库），退回「待发货」——
+     * 这是最保守的选择：钱已经收了、货还没发，运营还能再发或再协商。
+     */
+    public OrderVO handleRefund(Long orderId, boolean approve, String reply) {
+        String text = requireText(reply, 255);
+        Order o = requireOrder(orderId);
+        if (!STATUS_REFUND_REQUESTED.equals(o.getStatus())) {
+            throw new BizException(ErrorCode.ORDER_STATUS_INVALID,
+                    "这笔订单没有待处理的退款申请，当前是「" + statusLabel(o.getStatus()) + "」");
+        }
+        String back = StringUtils.hasText(o.getStatusBeforeRefund())
+                ? o.getStatusBeforeRefund()
+                : STATUS_PENDING_SHIPMENT;
+        orderMapper.update(null, Wrappers.<Order>lambdaUpdate()
+                .eq(Order::getId, orderId)
+                .set(Order::getStatus, approve ? STATUS_REFUNDED : back)
+                .set(Order::getRefundReply, text)
+                .set(Order::getRefundHandledAt, LocalDateTime.now())
+                .set(Order::getStatusBeforeRefund, null));
+        return reloadAsAdmin(orderId);
+    }
 
-        // 回给前端的这一份也带上买家信息，运营端才能整行替换而不是丢掉昵称
-        AppUser u = appUserMapper.selectById(saved.getUserId());
-        return attachItems(List.of(saved), u == null ? Map.of() : Map.of(saved.getUserId(), u)).get(0);
+    /**
+     * 把超时未付款的订单改成已取消。由定时任务调用（见 {@code OrderTimeoutTask}）。
+     *
+     * <p>用一条 UPDATE 批量处理，而不是"查出来再逐个改"：待付款订单可能很多，
+     * 逐个改会产生 N 条 UPDATE；而且中间任何一条失败都会留下"扫了一半"的状态，
+     * 下一次扫描还得判断哪些处理过。一条 SQL 要么全成要么全不成。
+     *
+     * <p>条件里的 {@code isNotNull(payDeadline)} 不能省：手工插的历史订单
+     * 可能没设过这一列。NULL 与时间比较结果是 NULL 而不是 true，虽然结果一样，
+     * 但显式写出来能让人一眼看出"没设截止时间的不会被误杀"。
+     *
+     * @return 本次取消了几单
+     */
+    public int cancelExpiredOrders() {
+        LocalDateTime now = LocalDateTime.now();
+        return orderMapper.update(null, Wrappers.<Order>lambdaUpdate()
+                .eq(Order::getStatus, STATUS_PENDING_PAYMENT)
+                .isNotNull(Order::getPayDeadline)
+                .lt(Order::getPayDeadline, now)
+                .set(Order::getStatus, STATUS_CANCELLED)
+                .set(Order::getCancelledAt, now)
+                .set(Order::getCancelReason, CANCEL_TIMEOUT));
+    }
+
+    /**
+     * 支付时限（分钟）。
+     *
+     * <p>暴露出来是给定时任务的日志用的：日志里写死"30 分钟"的话，
+     * 哪天改了 {@link #PAY_WINDOW_MINUTES}，日志会继续宣称 30 分钟，
+     * 而实际规则已经变了 —— 排查问题的人会照着错的数字去算。
+     */
+    public int payWindowMinutes() {
+        return PAY_WINDOW_MINUTES;
     }
 
     // ==================================================================
@@ -452,14 +836,18 @@ public class OrderService {
     }
 
     /**
-     * 批量补齐明细与买家信息。
+     * 批量补齐明细、买家信息、评价与可用操作。
      *
      * <p>先一次性把涉及到的 orderId 全部查出来再分组，而不是在循环里逐个订单查 ——
-     * 后者是典型的 N+1：运营端一屏 20 个订单就是 21 次查询。
+     * 后者是典型的 N+1：运营端一屏 20 个订单就是 21 次查询。评价同理，
+     * 一次查完再按 orderId 分组。
      *
      * @param users userId -> 买家。传空 Map 表示不需要买家信息（用户端看自己的单）
+     * @param admin true = 运营端视角。只影响 availableActions 给出哪些操作，
+     *              不影响其它字段：运营端拿到 SHIP / HANDLE_REFUND，
+     *              用户端拿到 PAY / CANCEL / CONFIRM_RECEIPT / REQUEST_REFUND / REVIEW
      */
-    private List<OrderVO> attachItems(List<Order> orders, Map<Long, AppUser> users) {
+    private List<OrderVO> attachItems(List<Order> orders, Map<Long, AppUser> users, boolean admin) {
         if (orders.isEmpty()) {
             return List.of();
         }
@@ -471,17 +859,25 @@ public class OrderService {
                 .stream()
                 .collect(Collectors.groupingBy(OrderItem::getOrderId));
 
+        Map<Long, OrderReview> reviews = orderReviewMapper
+                .selectList(Wrappers.<OrderReview>lambdaQuery().in(OrderReview::getOrderId, ids))
+                .stream()
+                .collect(Collectors.toMap(OrderReview::getOrderId, Function.identity(), (a, b) -> a));
+
         List<OrderVO> out = new ArrayList<>(orders.size());
         for (Order o : orders) {
             AppUser u = users.get(o.getUserId());
             out.add(toOrderVO(o, grouped.getOrDefault(o.getId(), List.of()),
                     u == null ? null : u.getNickname(),
-                    u == null ? null : u.getEmail()));
+                    u == null ? null : u.getEmail(),
+                    reviews.get(o.getId()),
+                    admin));
         }
         return out;
     }
 
-    private OrderVO toOrderVO(Order o, List<OrderItem> items, String nickname, String email) {
+    private OrderVO toOrderVO(Order o, List<OrderItem> items, String nickname, String email,
+                              OrderReview review, boolean admin) {
         OrderVO v = new OrderVO();
         v.setId(o.getId());
         v.setOrderNo(o.getOrderNo());
@@ -490,6 +886,16 @@ public class OrderService {
         v.setBuyerEmail(email);
         v.setStatus(o.getStatus());
         v.setStatusLabel(statusLabel(o.getStatus()));
+
+        // 已评价就把 REVIEW 从可选操作里去掉 —— 否则前端会一直显示一个
+        // 点了就报 6010 的"去评价"按钮。状态本身没错（还是已完成），
+        // 但"能做什么"已经变了，这一层只有服务端知道。
+        List<String> actions = availableActions(o.getStatus(), admin);
+        if (review != null) {
+            actions = actions.stream().filter(a -> !"REVIEW".equals(a)).toList();
+        }
+        v.setAvailableActions(actions);
+
         v.setItemCount(o.getItemCount());
         v.setTotalAmount(o.getTotalAmount());
         v.setReceiverName(o.getReceiverName());
@@ -497,7 +903,21 @@ public class OrderService {
         v.setReceiverAddress(o.getReceiverAddress());
         v.setRemark(o.getRemark());
         v.setChannel(o.getChannel());
+
+        v.setPayDeadline(o.getPayDeadline());
+        v.setPaidAt(o.getPaidAt());
         v.setShippedAt(o.getShippedAt());
+        v.setCarrier(o.getCarrier());
+        v.setEtaDays(o.getEtaDays());
+        v.setTrackingNo(o.getTrackingNo());
+        v.setReceivedAt(o.getReceivedAt());
+        v.setCancelledAt(o.getCancelledAt());
+        v.setCancelReason(o.getCancelReason());
+        v.setRefundReason(o.getRefundReason());
+        v.setRefundReply(o.getRefundReply());
+        v.setRefundAt(o.getRefundAt());
+        v.setRefundHandledAt(o.getRefundHandledAt());
+
         v.setCreatedAt(o.getCreatedAt());
 
         List<OrderItemVO> list = new ArrayList<>(items.size());
@@ -517,7 +937,40 @@ public class OrderService {
             list.add(iv);
         }
         v.setItems(list);
+        v.setReview(review == null ? null : toReviewVO(review));
         return v;
+    }
+
+    /**
+     * 当前状态下这个角色能做什么。
+     *
+     * <p>放在服务端算，前端不维护"状态 -> 按钮"的映射表 —— 与 statusLabel
+     * 同一个理由：状态是后端定义的，加一个状态就要通知前端改，迟早漏一处，
+     * 而漏掉的后果是按钮该出现时没出现、该消失时还在（用户点了才报错）。
+     */
+    private List<String> availableActions(String status, boolean admin) {
+        if (admin) {
+            if (STATUS_PENDING_SHIPMENT.equals(status)) {
+                return List.of("SHIP");
+            }
+            if (STATUS_REFUND_REQUESTED.equals(status)) {
+                return List.of("HANDLE_REFUND");
+            }
+            return List.of();
+        }
+        if (STATUS_PENDING_PAYMENT.equals(status)) {
+            return List.of("PAY", "CANCEL");
+        }
+        if (STATUS_PENDING_SHIPMENT.equals(status)) {
+            return List.of("REQUEST_REFUND");
+        }
+        if (STATUS_SHIPPED.equals(status)) {
+            return List.of("CONFIRM_RECEIPT", "REQUEST_REFUND");
+        }
+        if (STATUS_COMPLETED.equals(status)) {
+            return List.of("REVIEW");
+        }
+        return List.of();
     }
 
     /**
@@ -527,12 +980,170 @@ public class OrderService {
      * 加一个状态就要通知前端改一次，迟早漏掉某处显示成裸的英文枚举。
      */
     private String statusLabel(String status) {
-        if (STATUS_PENDING.equals(status)) {
+        if (STATUS_PENDING_PAYMENT.equals(status)) {
+            return "待付款";
+        }
+        if (STATUS_PENDING_SHIPMENT.equals(status)) {
             return "待发货";
         }
         if (STATUS_SHIPPED.equals(status)) {
             return "已发货";
         }
+        if (STATUS_COMPLETED.equals(status)) {
+            return "已完成";
+        }
+        if (STATUS_CANCELLED.equals(status)) {
+            return "已取消";
+        }
+        if (STATUS_REFUND_REQUESTED.equals(status)) {
+            return "退款中";
+        }
+        if (STATUS_REFUNDED.equals(status)) {
+            return "已退款";
+        }
         return status;
+    }
+
+    // ==================================================================
+    // 订单取数与回读
+    // ==================================================================
+
+    /** 按 id 取订单，不存在则 6005。运营端用（不校验归属） */
+    private Order requireOrder(Long orderId) {
+        Order o = orderMapper.selectById(orderId);
+        if (o == null) {
+            throw new BizException(ErrorCode.ORDER_NOT_FOUND);
+        }
+        return o;
+    }
+
+    /**
+     * 按 id 取订单，并校验它属于这个用户。
+     *
+     * <p>别人的订单一律按"不存在"处理（6005），不返回 4003 ——
+     * 4003 等于告诉对方"这一单确实存在"，可以被拿来枚举。
+     */
+    private Order requireOwnOrder(Long userId, Long orderId) {
+        Order o = requireOrder(orderId);
+        if (!o.getUserId().equals(userId)) {
+            throw new BizException(ErrorCode.ORDER_NOT_FOUND);
+        }
+        return o;
+    }
+
+    /**
+     * 写完回读一次，给用户端用。
+     *
+     * <p>理由不只是"稳妥"，是一个真实踩到过的不一致：Java 的
+     * {@code LocalDateTime.now()} 带纳秒，而 DATETIME 列没有小数秒，MySQL 会四舍五入。
+     * 不回读的话，接口返回 {@code ...18:45:08.7085987}，而用户随后刷新看到
+     * {@code ...18:45:09} —— 同一个字段两次读不一样。前端目前只显示到分钟
+     * 所以看不出来，但那是运气，不是设计。
+     */
+    private OrderVO reloadAsUser(Long orderId) {
+        return attachItems(List.of(orderMapper.selectById(orderId)), Map.of(), false).get(0);
+    }
+
+    /** 写完回读一次，给运营端用。额外带上买家信息，运营端才能整行替换而不丢掉昵称 */
+    private OrderVO reloadAsAdmin(Long orderId) {
+        Order saved = orderMapper.selectById(orderId);
+        AppUser u = appUserMapper.selectById(saved.getUserId());
+        return attachItems(List.of(saved),
+                u == null ? Map.of() : Map.of(saved.getUserId(), u), true).get(0);
+    }
+
+    private String requireShipInfo(String v, int max, String field) {
+        if (!StringUtils.hasText(v)) {
+            throw new BizException(ErrorCode.SHIP_INFO_REQUIRED, "请填写" + field);
+        }
+        String t = v.trim();
+        if (t.length() > max) {
+            throw new BizException(ErrorCode.SHIP_INFO_REQUIRED,
+                    field + "过长，请精简到 " + max + " 字以内");
+        }
+        return t;
+    }
+
+    // ==================================================================
+    // 评价图片
+    // ==================================================================
+
+    /**
+     * 清洗评价图片列表：去空、去重、挡掉可疑路径、截到 3 张。
+     *
+     * <p>为什么服务端还要再截一次：前端确实限了 3 张，但接口是公开的，
+     * 绕过页面直接调接口就能塞 50 张。**限制必须落在服务端**，
+     * 前端的限制只是体验，不是约束。
+     *
+     * <p>路径校验挡的是 {@code ../} 这类穿越写法：这个值最终会被前端拼成
+     * 图片 URL，不校验的话可能被带出媒体目录。图片本身早就由上传接口写进
+     * 磁盘了，这里存的只是它的相对路径。
+     */
+    private List<String> normalizeImages(List<String> images) {
+        if (images == null || images.isEmpty()) {
+            return List.of();
+        }
+        List<String> out = new ArrayList<>();
+        for (String s : images) {
+            if (!StringUtils.hasText(s)) {
+                continue;
+            }
+            String t = s.trim();
+            if (t.length() > 255 || t.contains("..") || !t.matches("[A-Za-z0-9._/-]+")) {
+                log.warn("[评价图片] 丢弃可疑路径: {}", t);
+                continue;
+            }
+            if (!out.contains(t)) {
+                out.add(t);
+            }
+            if (out.size() >= MAX_REVIEW_IMAGES) {
+                break;
+            }
+        }
+        return out;
+    }
+
+    private String toImagesJson(List<String> images) {
+        try {
+            return objectMapper.writeValueAsString(images);
+        } catch (Exception e) {
+            // 走到这里说明是编码问题而不是数据问题，直接放弃存图比存一半好
+            log.warn("[评价图片] 序列化失败，按无图处理: {}", images, e);
+            return null;
+        }
+    }
+
+    /**
+     * 把库里的 JSON 字符串还原成数组。
+     *
+     * <p>解析失败按"无图"处理而不是抛异常：评价的文字和星级仍然有价值，
+     * 不该因为一组图片的格式问题让整个评价打不开。
+     */
+    private List<String> parseImages(String json) {
+        if (!StringUtils.hasText(json)) {
+            return List.of();
+        }
+        try {
+            List<String> list = objectMapper.readValue(json, new TypeReference<List<String>>() {});
+            return list == null ? List.of() : list;
+        } catch (Exception e) {
+            log.warn("[评价图片] JSON 解析失败，按无图处理: {}", json);
+            return List.of();
+        }
+    }
+
+    private OrderReviewVO toReviewVO(OrderReview r) {
+        OrderReviewVO v = new OrderReviewVO();
+        v.setId(r.getId());
+        v.setOrderId(r.getOrderId());
+        v.setRating(r.getRating());
+        v.setContent(r.getContent());
+        // 库里存相对路径，出库拼成完整 URL（与 PoiImageVO 同一约定）。
+        // 前端拿到的 images 可以直接塞进 <img src>，不必知道 /api/media/ 这个前缀。
+        v.setImages(parseImages(r.getImages()).stream()
+                .map(p -> MediaStorageService.URL_PREFIX + p)
+                .toList());
+        v.setCreatedAt(r.getCreatedAt());
+        return v;
     }
 }

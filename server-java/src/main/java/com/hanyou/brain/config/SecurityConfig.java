@@ -114,6 +114,11 @@ public class SecurityConfig {
                         // review 时一眼能看出"这个接口是公开还是受保护"。
                         .requestMatchers("/api/cart/**", "/api/orders/**").authenticated()
 
+                        // 评价图片上传（M6）。与运营上传 /api/admin/media/** 分开，
+                        // 因为这里是**任何登录用户**都能用的 —— 评价要传图，
+                        // 但运营上传接口不能被放开给所有人。
+                        .requestMatchers("/api/reviews/**").authenticated()
+
                         // 认证后与个人相关的接口（当前只有 me/logout，见 AuthController）
                         .requestMatchers("/api/me/**").authenticated()
 

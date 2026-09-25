@@ -17,9 +17,14 @@ import lombok.Data;
  *
  * <p>本表**刻意没有 cityCode**，理由同 {@link CartItem}：订单是运行期数据。
  *
- * <p>{@code status} 只有 PENDING / SHIPPED 两个值，这是刻意的。
- * 支付状态与物流状态需要真实的支付、物流通道才成立，做了就是摆样子，
- * 还会让运营端多出一堆永远停在某个状态的数据。取消订单同理，留作扩展点。
+ * <p>{@code status} 现在是一条完整的订单状态机：
+ * PENDING_PAYMENT 待付款 → PENDING_SHIPMENT 待发货 → SHIPPED 已发货 → COMPLETED 已完成；
+ * 另有 CANCELLED 已取消、REFUND_REQUESTED 退款中、REFUNDED 已退款三个分支状态。
+ * 各状态的流转条件与异常分支见 {@link com.hanyou.brain.service.OrderService} 顶部说明。
+ *
+ * <p>支付与物流都是**演示级**的：没有接真实支付通道（"付款"就是一个按钮），
+ * 物流信息由运营手工填写、系统不去查快递接口。这一点在验收记录里写明了，
+ * 答辩时不要含糊过去 —— 说"我们做了支付"会被追问到通道与对账。
  *
  * <p>金额用 {@link BigDecimal} 不用 double：double 是二进制浮点，
  * 0.1 + 0.2 != 0.3，金额算错在答辩现场被问一句就下不来台。
@@ -67,6 +72,65 @@ public class Order {
 
     /** 发货时间，未发货为 null */
     private LocalDateTime shippedAt;
+
+    // ---------------- 支付 ----------------
+
+    /**
+     * 支付截止时刻 = 下单时刻 + 30 分钟。超过它还没付款，定时任务会把订单改成已取消。
+     *
+     * <p>存"截止时刻"而不是"剩余秒数"：存秒数的话，服务重启一次、或定时任务
+     * 晚跑一会儿，倒计时就不准了。绝对时刻任何时候拿来和当前时间一比就知道过期没有。
+     */
+    private LocalDateTime payDeadline;
+
+    /** 付款时刻。不接真实支付，"付款"是用户点的一个按钮 */
+    private LocalDateTime paidAt;
+
+    // ---------------- 物流（发货时由运营填写）----------------
+
+    /** 快递公司，如「顺丰速运」 */
+    private String carrier;
+
+    /** 预计到达天数 */
+    private Integer etaDays;
+
+    /** 快递单号 */
+    private String trackingNo;
+
+    // ---------------- 收货 ----------------
+
+    /** 确认收货时刻。只有已发货的订单能确认收货 */
+    private LocalDateTime receivedAt;
+
+    // ---------------- 取消 ----------------
+
+    private LocalDateTime cancelledAt;
+
+    /** TIMEOUT 超时未付自动取消 / USER 用户主动取消 */
+    private String cancelReason;
+
+    // ---------------- 退款 ----------------
+
+    /** 买家填写的退款原因 */
+    private String refundReason;
+
+    /** 管理员处理退款时的回复 / 拒绝理由 */
+    private String refundReply;
+
+    /** 买家申请退款的时刻 */
+    private LocalDateTime refundAt;
+
+    /** 管理员处理退款的时刻 */
+    private LocalDateTime refundHandledAt;
+
+    /**
+     * 申请退款**之前**的状态。
+     *
+     * <p>管理员拒绝退款时，订单要退回申请前的状态（可能是待发货，也可能是已发货）。
+     * 不记下来就回不去了 —— 这是"只用一个 status 字段表达退款中"必须付的代价，
+     * 但它比另开一个 refund_status 列要好：两列表达同一件事，迟早有一天对不上。
+     */
+    private String statusBeforeRefund;
 
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;

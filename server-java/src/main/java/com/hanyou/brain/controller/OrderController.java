@@ -13,9 +13,12 @@ import org.springframework.web.bind.annotation.RestController;
 
 import com.hanyou.brain.auth.AuthUser;
 import com.hanyou.brain.common.BizException;
+import com.hanyou.brain.common.BodyReader;
 import com.hanyou.brain.common.ErrorCode;
 import com.hanyou.brain.common.Result;
 import com.hanyou.brain.service.OrderService;
+import com.hanyou.brain.vo.OrderCountVO;
+import com.hanyou.brain.vo.OrderReviewVO;
 import com.hanyou.brain.vo.OrderVO;
 
 import lombok.RequiredArgsConstructor;
@@ -42,6 +45,22 @@ public class OrderController {
     @GetMapping
     public Result<List<OrderVO>> list(@AuthenticationPrincipal AuthUser me) {
         return Result.ok(orderService.listMyOrders(uid(me)));
+    }
+
+    /**
+     * 我的订单计数（顶栏「我的订单」角标用）。
+     *
+     * <p>路径写在 {@code /{id}} 之前只是为了让读代码的人先看到它；
+     * 真正决定优先级的是 Spring 的路径匹配规则 —— 字面量段
+     * （{@code count}）优先于变量段（{@code {id}}），所以这个映射
+     * 不会被 {@code /{id}} 抢走，也不会因为 id 转不成 Long 而报 400。
+     *
+     * <p>与 {@code /api/cart/count} 对称：顶栏只要一个数字，
+     * 不该为此拉整张订单列表。
+     */
+    @GetMapping("/count")
+    public Result<OrderCountVO> count(@AuthenticationPrincipal AuthUser me) {
+        return Result.ok(orderService.countMyOrders(uid(me)));
     }
 
     /** 订单详情 */
@@ -71,19 +90,75 @@ public class OrderController {
         Map<String, Object> b = body == null ? Map.of() : body;
         return Result.ok(orderService.createOrder(
                 uid(me),
-                str(b, "receiver_name"),
-                str(b, "receiver_phone"),
-                str(b, "receiver_address"),
-                str(b, "remark")));
+                BodyReader.str(b, "receiver_name"),
+                BodyReader.str(b, "receiver_phone"),
+                BodyReader.str(b, "receiver_address"),
+                BodyReader.str(b, "remark")));
     }
 
-    /** 只认字符串值。数字/布尔也接（前端表单值可能被 JSON 化成数字），其余一律当没传 */
-    private static String str(Map<String, Object> body, String key) {
-        Object v = body.get(key);
-        if (v == null || v instanceof Map || v instanceof Iterable || v.getClass().isArray()) {
-            return null;
-        }
-        return String.valueOf(v);
+    // ==================================================================
+    // 状态流转。每个动作一个接口，而不是一个"通用改状态"的接口。
+    //
+    // 为什么不做一个 POST /{id}/status 让前端传目标状态：那样服务端就
+    // 得在一个方法里写七套校验，而且"用户能不能把订单改成已退款"这种事
+    // 变成了参数校验问题，很容易漏掉一个组合。一个动作一个入口，
+    // 每个入口只允许一条流转，越权与错状态都天然被挡住。
+    //
+    // 所有接口都不接受金额参数：金额只在下单那一刻由服务端算定。
+    // ==================================================================
+
+    /**
+     * 付款。演示级：不接真实支付通道，调一次就是"已付款"。
+     *
+     * <p>没有请求体 —— 付多少钱由服务端按订单总额算，前端传什么都不看。
+     * 真实支付里这里应该是"创建支付单 → 等回调确认"，本项目不做到那一步，
+     * 验收记录里也写明了这一点。
+     */
+    @PostMapping("/{id}/pay")
+    public Result<OrderVO> pay(@AuthenticationPrincipal AuthUser me, @PathVariable Long id) {
+        return Result.ok(orderService.payOrder(uid(me), id));
+    }
+
+    /** 取消订单。只有待付款能直接取消，已付款的要走退款流程 */
+    @PostMapping("/{id}/cancel")
+    public Result<OrderVO> cancel(@AuthenticationPrincipal AuthUser me, @PathVariable Long id) {
+        return Result.ok(orderService.cancelOrder(uid(me), id));
+    }
+
+    /** 确认收货。只有已发货能确认；确认后才能评价 */
+    @PostMapping("/{id}/receipt")
+    public Result<OrderVO> receipt(@AuthenticationPrincipal AuthUser me, @PathVariable Long id) {
+        return Result.ok(orderService.confirmReceipt(uid(me), id));
+    }
+
+    /**
+     * 申请退款。请求体只取 {@code refund_reason} 一个键。
+     *
+     * <p>同样用 {@code Map<String, Object>} 而不是 {@code Map<String, String>}，
+     * 理由见上面 create 方法的注释（非标量字段会把 9000 抛给客户端）。
+     */
+    @PostMapping("/{id}/refund")
+    public Result<OrderVO> refund(@AuthenticationPrincipal AuthUser me,
+                                  @PathVariable Long id,
+                                  @RequestBody(required = false) Map<String, Object> body) {
+        Map<String, Object> b = body == null ? Map.of() : body;
+        return Result.ok(orderService.requestRefund(uid(me), id, BodyReader.str(b, "refund_reason")));
+    }
+
+    /**
+     * 评价。请求体取 {@code rating / content / images}。
+     *
+     * <p>{@code images} 是字符串数组，必须单独取：通用的 {@code str()}
+     * 会把数组判为"没传"（那是它刻意的行为，用来挡非法字段），
+     * 直接套用会静默丢掉用户上传的图片。
+     */
+    @PostMapping("/{id}/review")
+    public Result<OrderReviewVO> review(@AuthenticationPrincipal AuthUser me,
+                                        @PathVariable Long id,
+                                        @RequestBody(required = false) Map<String, Object> body) {
+        Map<String, Object> b = body == null ? Map.of() : body;
+        return Result.ok(orderService.createReview(
+                uid(me), id, BodyReader.intOf(b, "rating"), BodyReader.str(b, "content"), BodyReader.strList(b, "images")));
     }
 
     /** 同 CartController：兜底守卫，避免以后被误放行时抛出 NPE */

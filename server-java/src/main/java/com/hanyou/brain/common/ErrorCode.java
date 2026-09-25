@@ -60,6 +60,13 @@ public enum ErrorCode {
     ORDER_STATUS_INVALID(6006, "订单当前状态不允许该操作"),
     QUANTITY_INVALID(6007, "数量不合法"),
     RECEIVER_INVALID(6008, "收货信息不完整"),
+    SHIP_INFO_REQUIRED(6009, "请填写快递公司、预计到达天数和快递单号"),
+    REVIEW_EXISTS(6010, "这笔订单已经评价过了"),
+    REVIEW_RATING_INVALID(6011, "请选择 1 到 5 星"),
+    REVIEW_CONTENT_REQUIRED(6012, "请写点评价内容，或至少打个星级"),
+    ORDER_PAY_EXPIRED(6013, "订单已超过支付时限，已自动取消"),
+    REFUND_REASON_REQUIRED(6014, "请填写退款原因"),
+    REFUND_NOTE_REQUIRED(6015, "请填写处理说明"),
 
     INTERNAL(9000, "服务内部错误");
 
