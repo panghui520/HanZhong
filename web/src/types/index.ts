@@ -385,8 +385,82 @@ export interface OrderItem {
   subtotal: number
 }
 
-/** 订单状态。只有两个：待发货 → 已发货。不做支付与物流状态 */
-export type OrderStatus = 'PENDING' | 'SHIPPED'
+/**
+ * 订单状态。完整状态机：
+ *
+ * ```
+ * PENDING_PAYMENT 待付款 ──30 分钟未付──▶ CANCELLED 已取消
+ *      │ 付款
+ *      ▼
+ * PENDING_SHIPMENT 待发货 ──运营发货──▶ SHIPPED 已发货 ──确认收货──▶ COMPLETED 已完成
+ *      │                                   │                              │
+ *      └──────────申请退款─────────────────┘                      评价（星级+文字+图片）
+ *                     │
+ *                     ▼
+ *          REFUND_REQUESTED 退款中 ──管理员同意──▶ REFUNDED 已退款
+ *                                  └─管理员拒绝──▶ 退回申请前的状态
+ * ```
+ *
+ * 流转规则以服务端为准，前端**不要**自己判断"这个状态能不能取消"——
+ * 服务端已经把当前能做的操作算进 `available_actions` 了。
+ */
+export type OrderStatus =
+  | 'PENDING_PAYMENT'
+  | 'PENDING_SHIPMENT'
+  | 'SHIPPED'
+  | 'COMPLETED'
+  | 'CANCELLED'
+  | 'REFUND_REQUESTED'
+  | 'REFUNDED'
+
+/**
+ * 当前状态下可执行的操作，由服务端算好。
+ *
+ * 用户端会出现：PAY / CANCEL / CONFIRM_RECEIPT / REQUEST_REFUND / REVIEW
+ * 运营端会出现：SHIP / HANDLE_REFUND
+ *
+ * 前端只做一件事：`actions.includes('PAY')` 决定按钮显不显示。
+ * **不要再写一份"状态 → 按钮"的映射表** —— 那会和后端规则慢慢漂移，
+ * 而漂移的后果是按钮该出现时没出现、该消失时还在（用户点了才报错）。
+ */
+export type OrderAction =
+  | 'PAY'
+  | 'CANCEL'
+  | 'CONFIRM_RECEIPT'
+  | 'REQUEST_REFUND'
+  | 'REVIEW'
+  | 'SHIP'
+  | 'HANDLE_REFUND'
+
+/** 订单评价。一单一评，靠库里的唯一键保证 */
+export interface OrderReview {
+  id: number
+  order_id: number
+  /** 星级 1..5 */
+  rating: number
+  content?: string
+  /**
+   * 图片地址，**服务端已拼成可直接用于 `<img src>` 的完整 URL**
+   * （形如 `/api/media/review/3/xxx.jpg`）。
+   *
+   * 注意与提交时不对称：提交评价时传的是上传接口返回的**相对路径**，
+   * 因为服务端要拿它做 `..` 穿越校验，不能让客户端自由拼前缀。
+   */
+  images: string[]
+  created_at?: string
+}
+
+/**
+ * 我的订单计数（顶栏「我的订单」角标）。
+ *
+ * `pending` 是**需要用户动手**的订单数（待付款 + 已发货），
+ * 角标显示的是它，不是 `total` —— 已完成的订单用户无事可做，
+ * 算进去角标就只增不减，变成一个永远消不掉的红点。
+ */
+export interface OrderCount {
+  total: number
+  pending: number
+}
 
 export interface Order {
   id: number
@@ -399,6 +473,8 @@ export interface Order {
   status: OrderStatus
   /** 状态中文名，服务端算好，前端不维护映射表 */
   status_label: string
+  /** 当前状态下能做的操作，服务端算好。见 OrderAction 的注释 */
+  available_actions: OrderAction[]
   item_count: number
   total_amount: number
   /** 收货信息（下单时快照，不随地址变更而变） */
@@ -408,8 +484,32 @@ export interface Order {
   remark?: string
   /** TRIP 到访当场带走 / REPURCHASE 离境复购 */
   channel: string
+
+  /** 支付截止时刻。待付款时前端拿它显示倒计时 */
+  pay_deadline?: string
+  paid_at?: string
+
   shipped_at?: string
+  /** 物流三要素，发货时由运营填写 */
+  carrier?: string
+  eta_days?: number
+  tracking_no?: string
+
+  received_at?: string
+
+  cancelled_at?: string
+  /** TIMEOUT 超时未付自动取消 / USER 用户主动取消 */
+  cancel_reason?: string
+
+  refund_reason?: string
+  /** 管理员对退款的处理说明 / 拒绝理由 */
+  refund_reply?: string
+  refund_at?: string
+  refund_handled_at?: string
+
   created_at?: string
   items: OrderItem[]
+  /** 已评价时带上；未评价则整个字段缺省（后端 non_null 序列化） */
+  review?: OrderReview
 }
 

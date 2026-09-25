@@ -51,6 +51,15 @@ const routes = [
         component: () => import('@/views/portal/Orders.vue'),
         meta: { requiresAuth: true },
       },
+      {
+        // M6 订单详情：状态时间线、物流、付款、退款、评价都在这一页。
+        // 结算成功后会直接跳到这里（见 Checkout.vue），
+        // 因为用户那一刻唯一想做的事就是付款。
+        path: 'orders/:id(\\d+)',
+        name: 'order-detail',
+        component: () => import('@/views/portal/OrderDetail.vue'),
+        meta: { requiresAuth: true },
+      },
     ],
   },
   // 登录页独立于 PortalLayout：不显示顶栏与页脚，保持沉浸感

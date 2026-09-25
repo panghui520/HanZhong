@@ -126,7 +126,10 @@ async function submit() {
     })
     // 下单成功后购物车已被服务端清空，角标要跟着归零
     await cart.refresh()
-    void router.replace({ path: '/orders', query: { created: order.order_no } })
+    // ★ 直接落到**订单详情**而不是订单列表：下单后进入的是「待付款」，
+    // 用户此刻唯一想做的事就是付款，把他丢到列表里再找一次"付款"按钮
+    // 是多余的一步。详情页有倒计时，也能说清"超时会自动取消"。
+    void router.replace({ path: `/orders/${order.id}`, query: { created: '1' } })
   } catch (e) {
     submitError.value = e instanceof ApiError ? e.message : '提交失败，请重试'
   } finally {
