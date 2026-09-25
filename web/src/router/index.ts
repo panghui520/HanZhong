@@ -26,6 +26,31 @@ const routes = [
         component: () => import('@/views/portal/Itinerary.vue'),
       },
       { path: 'poi/:id', name: 'poi', component: () => import('@/views/portal/PoiDetail.vue') },
+
+      // ---------------- M6 消费与离境复购 ----------------
+      // 乡村好物可以随便看（它就是一份"汉中的味道"清单），
+      // 但从加购开始要登录：购物车与订单都是"我的数据"。
+      // 后端 SecurityConfig 里 /api/cart/** 与 /api/orders/** 也是这么配的，
+      // 两边保持一致 —— 前端这层只管体验，真正的拦截在后端。
+      { path: 'goods', name: 'goods', component: () => import('@/views/portal/Goods.vue') },
+      {
+        path: 'cart',
+        name: 'cart',
+        component: () => import('@/views/portal/Cart.vue'),
+        meta: { requiresAuth: true },
+      },
+      {
+        path: 'checkout',
+        name: 'checkout',
+        component: () => import('@/views/portal/Checkout.vue'),
+        meta: { requiresAuth: true },
+      },
+      {
+        path: 'orders',
+        name: 'orders',
+        component: () => import('@/views/portal/Orders.vue'),
+        meta: { requiresAuth: true },
+      },
     ],
   },
   // 登录页独立于 PortalLayout：不显示顶栏与页脚，保持沉浸感
@@ -46,6 +71,12 @@ const routes = [
         path: 'media',
         name: 'admin-media',
         component: () => import('@/views/admin/Media.vue'),
+      },
+      {
+        // M6 订单处理：待发货 → 已发货
+        path: 'orders',
+        name: 'admin-orders',
+        component: () => import('@/views/admin/Orders.vue'),
       },
     ],
   },

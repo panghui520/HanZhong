@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { useCartStore } from '@/stores/cart'
 import { useSessionStore } from '@/stores/session'
 
 const scrolled = ref(false)
@@ -17,8 +18,23 @@ onUnmounted(() => {
 })
 
 const session = useSessionStore()
+const cart = useCartStore()
 const router = useRouter()
 const route = useRoute()
+
+/**
+ * 购物车角标（M6）。
+ *
+ * 两处要刷新：应用启动时拉一次、登录态变化时再拉一次。
+ * 退出登录必须清掉 —— 否则下一个人登录时会看到上一个人的角标数字。
+ * 加购之后由触发方（Goods / Cart）主动调 `cart.refresh()`，
+ * 这里不再 watch 路由，避免每次跳转都打一次接口。
+ */
+watch(
+  () => session.isLoggedIn,
+  (v) => (v ? cart.refresh() : cart.reset()),
+  { immediate: true }
+)
 
 /** 首页 Hero 是全屏大图，顶栏在未滚动前保持透明压在图上 */
 const overHero = computed(() => route.name === 'home' && !scrolled.value)
@@ -28,6 +44,7 @@ const navs = [
   { label: '探索汉中', to: '/explore' },
   { label: '行程规划', to: '/itinerary' },
   { label: '知识问答', to: '/assistant' },
+  { label: '乡村好物', to: '/goods' },
 ]
 
 /* ---------- 用户菜单 ---------- */
@@ -93,6 +110,33 @@ async function logout() {
         </nav>
 
         <div class="nav__actions">
+          <!--
+            购物车入口（M6）。只在登录后显示：
+            未登录时点进去也只是一个"请登录"的空壳，不如先让他看到登录入口。
+            角标数字来自服务端 /api/cart/count，不在本地猜。
+          -->
+          <router-link
+            v-if="session.isLoggedIn"
+            to="/cart"
+            class="nav__cart"
+            :title="`购物车 ${cart.count} 件`"
+          >
+            <svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true">
+              <path
+                d="M3 5h2.2l2.1 10.2h10.4l1.9-7.4H6.1"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.7"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              />
+              <circle cx="9.4" cy="19" r="1.5" fill="currentColor" />
+              <circle cx="16.6" cy="19" r="1.5" fill="currentColor" />
+            </svg>
+            <span class="nav__cart-label">购物车</span>
+            <span v-if="cart.count > 0" class="nav__cart-n num">{{ cart.count }}</span>
+          </router-link>
+
           <!-- 未登录：明确给出「登录 / 注册」入口 -->
           <router-link
             v-if="!session.isLoggedIn"
@@ -125,6 +169,8 @@ async function logout() {
               <router-link v-else to="/itinerary" class="usermenu__item">
                 我的行程
               </router-link>
+              <!-- 我的订单：游客与运营都能下单，所以不分角色，登录即可见 -->
+              <router-link to="/orders" class="usermenu__item">我的订单</router-link>
               <router-link v-if="!session.isAdmin" to="/assistant" class="usermenu__item">
                 知识问答
               </router-link>
@@ -173,9 +219,16 @@ async function logout() {
             <router-link to="/login">登录 / 注册</router-link>
           </div>
           <div class="footer__col">
+            <div class="footer__title">离境复购</div>
+            <router-link to="/goods">乡村好物</router-link>
+            <router-link to="/cart">购物车</router-link>
+            <router-link to="/orders">我的订单</router-link>
+          </div>
+          <div class="footer__col">
             <div class="footer__title">运营方</div>
             <router-link to="/login?role=admin">运营管理登录</router-link>
             <router-link to="/admin/dashboard">管理驾驶舱</router-link>
+            <router-link to="/admin/orders">订单处理</router-link>
           </div>
           <div class="footer__col">
             <div class="footer__title">数据来源</div>
@@ -350,6 +403,52 @@ async function logout() {
   gap: var(--sp-3);
 }
 
+/* ---------- 购物车入口（M6） ---------- */
+.nav__cart {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 34px;
+  padding: 0 var(--sp-3);
+  font-size: var(--fs-xs);
+  color: var(--ink-700);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  transition: all var(--dur-1) var(--ease);
+}
+.nav__cart:hover {
+  color: var(--brand-700);
+  border-color: var(--brand-300);
+  background: var(--brand-50);
+}
+.nav__cart-label {
+  font-weight: 500;
+}
+/* 角标用金色：与"离境复购"这条支线呼应，也不至于像未读消息那样刺眼 */
+.nav__cart-n {
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  display: inline-grid;
+  place-items: center;
+  font-size: 11px;
+  font-weight: 700;
+  color: #3a2a0c;
+  background: var(--gold-300);
+  border-radius: var(--r-pill);
+  line-height: 1;
+}
+.nav--over .nav__cart {
+  color: rgba(255, 255, 255, 0.9);
+  border-color: rgba(255, 255, 255, 0.28);
+}
+.nav--over .nav__cart:hover {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.14);
+  border-color: rgba(255, 255, 255, 0.6);
+}
+
 /* ---------- 登录入口 ---------- */
 .nav__login {
   display: inline-flex;
@@ -509,6 +608,13 @@ async function logout() {
   color: rgba(219, 233, 227, 0.6);
 }
 
+@media (max-width: 1080px) {
+  /* 顶栏塞不下这么多字了，购物车只留图标 + 角标 */
+  .nav__cart-label {
+    display: none;
+  }
+}
+
 @media (max-width: 720px) {
   .nav__links {
     gap: var(--sp-4);
@@ -519,6 +625,7 @@ async function logout() {
   }
   .footer__cols {
     gap: var(--sp-6);
+    flex-wrap: wrap;
   }
 }
 </style>

@@ -34,8 +34,13 @@ export function setUnauthorizedHandler(fn: UnauthorizedHandler) {
   onUnauthorized = fn
 }
 
-/** 需要登录的接口路径前缀：命中这些路径的 4001/4002 才触发全局登出 */
-const PROTECTED_PREFIXES = ['/me']
+/**
+ * 需要登录的接口路径前缀：命中这些路径的 4001/4002 才触发全局登出。
+ *
+ * `/cart` 与 `/orders` 是 M6 的"我的数据"，未登录时后端返回 4001，
+ * 应当把本地会话清掉并跳登录页 —— 否则用户会看到一个一直转圈的空页面。
+ */
+const PROTECTED_PREFIXES = ['/me', '/cart', '/orders']
 
 function isProtected(path: string) {
   return PROTECTED_PREFIXES.some((p) => path === p || path.startsWith(`${p}/`))

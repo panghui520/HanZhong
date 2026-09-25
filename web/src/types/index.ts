@@ -322,3 +322,94 @@ export interface SiteBanner {
 /** 景点 id -> 封面图地址。没有配图的景点不在这个映射里，前端回落手写 SVG */
 export type PoiCoverMap = Record<string, string>
 
+/* ============================================================
+ * 购物车与订单（M6）
+ *
+ * 同样受后端 `default-property-inclusion: non_null` 影响：
+ * 值为 null 的字段会被整个省略，前端拿到的是 undefined 而不是 null。
+ * 所以这里一律写成可选字段，判空用 `if (x)`。
+ *
+ * 金额字段在 Java 侧是 BigDecimal，Jackson 默认序列化成 JSON 数字，
+ * 到前端就是 number。**不要拿它做累加后再提交** ——
+ * 金额一律由服务端算，前端只负责显示。
+ * ============================================================ */
+
+/**
+ * 购物车行。
+ *
+ * `available` 为 false 表示该商品已下架或已不属于当前城市的数据包，
+ * 此时商品字段全部缺省。**不要静默跳过这种行** ——
+ * 用户会以为"我明明加过"，然后反复加购反复失败。要显式提示并给删除按钮。
+ */
+export interface CartItem {
+  /** 购物车行 id，不是商品 id。改数量、删除都用它 */
+  id: number
+  product_id: string
+  available: boolean
+  name?: string
+  spec?: string
+  scene?: string
+  /** 当前单价（购物车看的是"现在多少钱"） */
+  unit_price?: number
+  quantity: number
+  subtotal?: number
+  /** 当前库存，用来禁用「+」按钮 */
+  stock?: number
+  /** 体验锚点 */
+  experience_id?: string
+  experience_name?: string
+  /** 产地锚点，交给 PoiImage 取该乡村的封面图 */
+  poi_id?: string
+  poi_name?: string
+}
+
+/**
+ * 订单明细。
+ *
+ * 这里的 `unit_price` / `product_name` 是**下单时的快照**，
+ * 与 CartItem 的"当前价格"语义正好相反：产品后来调价，历史订单金额不能跟着变。
+ */
+export interface OrderItem {
+  id: number
+  product_id: string
+  /** 体验锚点（下单时快照）。订单行必须能回答"这件东西来自哪次体验" */
+  experience_id?: string
+  experience_name?: string
+  /** 产地锚点（下单时快照） */
+  poi_id?: string
+  poi_name?: string
+  product_name: string
+  spec?: string
+  unit_price: number
+  quantity: number
+  subtotal: number
+}
+
+/** 订单状态。只有两个：待发货 → 已发货。不做支付与物流状态 */
+export type OrderStatus = 'PENDING' | 'SHIPPED'
+
+export interface Order {
+  id: number
+  /** 对外单号，形如 HY20260925004217 */
+  order_no: string
+  user_id: number
+  /** 仅运营端有值 */
+  buyer_nickname?: string
+  buyer_email?: string
+  status: OrderStatus
+  /** 状态中文名，服务端算好，前端不维护映射表 */
+  status_label: string
+  item_count: number
+  total_amount: number
+  /** 收货信息（下单时快照，不随地址变更而变） */
+  receiver_name: string
+  receiver_phone: string
+  receiver_address: string
+  remark?: string
+  /** TRIP 到访当场带走 / REPURCHASE 离境复购 */
+  channel: string
+  shipped_at?: string
+  created_at?: string
+  items: OrderItem[]
+}
+
