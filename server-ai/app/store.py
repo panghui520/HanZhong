@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Sequence
@@ -33,6 +34,31 @@ MANIFEST_FILE = "manifest.json"
 # 候选池下限。实测：池子取 20 时 top5 命中与全量 BM25 完全一致（26 条用例），
 # 再放大到 40、83 都没有变化。取 20 是为了在语料长大之后仍然只做局部精排。
 MIN_POOL = 20
+
+logger = logging.getLogger("hanyou.ai")
+
+# 向量通道失效的告警去重。每问一次就刷一行会把日志淹掉，
+# 但完全静默又会让"通道其实没生效"藏很久——见 _warn_vector_failure 的注释。
+_VECTOR_FAIL_WARNED: set[str] = set()
+
+
+def _warn_vector_failure(exc: BaseException) -> None:
+    """向量通道失效时记一条日志（同一原因只记一次）。
+
+    这条日志是补出来的，起因是一个真实的坑：`ApiEmbedder.embed()` 早先不接受
+    `restrict_vocab` 参数，而检索层统一传 `restrict_vocab=True`，于是配了厂商
+    嵌入模型之后每次查询都 TypeError。异常被"向量失败就降级"的 except 吞掉，
+    结果**向量通道一次都没生效**，而检索表面上仍然"能用"（BM25 本来就负责排序，
+    分数看着正常），直到做通道消融——纯向量 top1 命中 0/26——才暴露。
+
+    所以这里的取舍是：降级本身是对的（外部依赖坏掉不该让整个请求失败），
+    但**降级必须是可观测的**。同一原因只报一次，既不淹没日志也不隐形。
+    """
+    key = f"{type(exc).__name__}: {exc}"
+    if key in _VECTOR_FAIL_WARNED:
+        return
+    _VECTOR_FAIL_WARNED.add(key)
+    logger.warning("[检索] 向量通道失效，本次退化为纯 BM25：%s", key)
 
 
 @dataclass
@@ -227,10 +253,18 @@ class KbStore:
         """混合检索：向量召回 ∪ BM25 召回 → 按 BM25 排序。
 
         为什么要两个通道而不是只留 BM25：BM25 是词法匹配，遇到完全换一种说法的
-        问句（用户的话和语料一个字都不重合）会落空，向量通道能靠 n-gram 分布
-        拉回一些候选。反过来，向量通道不能参与排序——它的分数受文档长度影响太大，
-        实测比 BM25 差 6 条（26 条用例）。所以这里的分工是：
+        问句（用户的话和语料一个字都不重合）会落空，向量通道能靠语义相似度
+        拉回一些候选。所以这里的分工是：
         向量只决定"哪些切片进入候选池"，BM25 决定"谁排前面"。
+
+        ⚠️ **这个分工的前提已经变了，值得单独做一轮**：
+        分工的原始依据是"向量分数受文档长度影响太大，实测比 BM25 差 6 条"——
+        那是**离线 ngram 实现**的结论。换成厂商语义嵌入（BAAI/bge-m3）后实测：
+        纯向量 top1 命中 22/26，**反超** BM25 的 20/26，两通道互补 8 条
+        （向量独中 5 条，BM25 独中 3 条）。也就是说融合排序（如 RRF）预计能到
+        25/26，而当前"BM25 单边排序"拿不到向量独中的那 5 条。
+        没在这一轮改，是因为排序策略会波及全部检索结果，需要单独一轮完整验收。
+        数据见 docs/验收记录-M3.md。
 
         候选池 = 向量 top-pool ∪ BM25 top-pool。当前语料只有 83 片、pool 取 20，
         实测与全量 BM25 的 top5 命中完全一致；语料长大后 pool 才真正起到限流作用。
@@ -293,7 +327,8 @@ class KbStore:
                 where=where or None,
                 include=["distances"],
             )
-        except Exception:  # noqa: BLE001 - 向量通道是增益项，失败不该拖垮检索
+        except Exception as exc:  # noqa: BLE001 - 向量通道是增益项，失败不该拖垮检索
+            _warn_vector_failure(exc)
             return []
 
         ids = result.get("ids") or [[]]

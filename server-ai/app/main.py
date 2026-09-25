@@ -28,11 +28,30 @@ from .qa import QaService
 from .store import IDF_FILE, KbStore
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-# jieba 在 DEBUG 级别打词典加载日志，启动时会刷十几行噪声，压到 WARNING
-logging.getLogger("jieba").setLevel(logging.WARNING)
 logger = logging.getLogger("hanyou.ai")
 
 BUILD_HINT = "python scripts/build_kb.py"
+
+
+def _quiet_jieba() -> None:
+    """把 jieba 的日志压到 WARNING。**必须在 warm_up() 之前调用。**
+
+    为什么不能简单地 `setLevel`：jieba 是**延迟导入**的（见 lexical._segment 里
+    函数内的 `import jieba`），而它的 __init__ 会执行
+    `default_logger.setLevel(logging.DEBUG)` 并挂一个自带 handler。
+    所以在导入前设级别会被它覆盖，在 warm_up() 之后设又太晚
+    —— 建词典的噪声正是在 warm_up() 里发出来的。
+
+    正确顺序：先 import 触发它的 __init__，再把级别压回去，最后才建词典。
+    """
+    import jieba  # noqa: F401  # 先导入，让 jieba 完成它自己的 logger 初始化
+
+    jl = logging.getLogger("jieba")
+    jl.setLevel(logging.WARNING)
+    # 去掉它自带的 stderr handler：那个 handler 没有 formatter，
+    # 消息会以裸文本再打一遍，日志里就变成每行出现两次。
+    jl.handlers.clear()
+    jl.propagate = True
 
 
 @asynccontextmanager
@@ -40,6 +59,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
     state: dict[str, Any] = {"settings": settings}
 
+    # 先压 jieba 日志，再建词典。顺序反了噪声就压不住（原因见 _quiet_jieba 的注释）。
+    _quiet_jieba()
     # jieba 词典第一次用才构建（约 0.6 秒）。放在启动路径上，
     # 免得第一个提问的用户替所有人付这笔钱。
     warm_up()

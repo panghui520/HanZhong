@@ -23,11 +23,24 @@ top1/top2 比、余弦、IDF 覆盖率、缺失词 IDF 占比、最高命中 IDF
 正例与反例——因为反例（"汉中有地铁吗""汉中房价多少"）都带"汉中"，
 词面上和语料很近，字符重合度根本不反映"有没有答案"。
 
-有效的信号是另一个：**查询里的实词在语料中是否完全不存在**。
+有效的信号是另一个：**查询里的主题词在语料中是否完全不存在**。
 "恐龙""护照""地铁""房价""签证""机票""上市公司"这些词一个都不在语料里，
 而"汉中""气候""朱鹮""茶园"都在。判定规则见 `topic_gaps`。
-实测：26 条正例 0 条误拒，10 条反例 1 条漏过（"汉中有哪些上市公司"，
-因为"公司"在语料里出现过，2 字子串判据把它当成了已知词组合）。
+实测：26 条正例 0 条误拒，10 条反例 0 条漏过，5 条推荐问题全部放行
+（脚本 `scripts/eval_retrieval.py`，**退出码即结论**）。
+
+判据演进过两轮，都是被真实缺陷逼出来的：
+
+· **第一轮**：原先只用"2 字子串是否命中"来放过已知词组合，结果"上市公司"
+  的 2 字子串里有"市公"，恰好来自语料中"城市公共…"这类文字，整词被当成
+  已知词组合放过 —— 反例漏过 1 条。改成"能否拆成两个语料里都出现过的词"
+  之后漏过归零（见 `_composed_of_known`）。
+· **第二轮**：加词性过滤。系统首屏推荐的
+  「汉中的气候怎么样，什么季节去最合适？」被拒答 —— jieba 把"最合适"
+  标成 a（形容词），语料里当然没有这个词。形容词/代词/数词/时间词缺失
+  只说明**问法**，不说明知识库有缺口（见 `NON_TOPIC_FLAGS`）。
+  这一条当时没被 26 条用例测出来，因为用例里没有"推荐问题"那种问法 ——
+  所以 `eval_retrieval.py` 补了第三段专门守推荐问题。
 """
 
 from __future__ import annotations
@@ -35,7 +48,7 @@ from __future__ import annotations
 import math
 from collections import Counter
 from dataclasses import dataclass, field
-from typing import Sequence
+from typing import Mapping, Sequence
 
 from .aliases import expand
 from .corpus import Chunk
@@ -56,6 +69,28 @@ QUESTION_WORDS = frozenset(
         "时候", "现在", "目前", "可以", "请问", "一下", "冷不冷", "热不热", "好不好", "多远",
         "多长", "多高", "好吃", "好喝", "好玩", "去哪", "在哪儿", "今天", "明天", "后天",
         "最近", "附近", "推荐", "怎么样", "多少公里", "几个小时",
+    }
+)
+
+# 词性上就不可能是"主题词"的标记。这些词缺失只说明**问法**，不说明知识库没写过。
+#
+# 为什么要有这一层：光靠 QUESTION_WORDS 补词是补不完的 —— "最合适""更方便"
+# "更划算"是开放集合。词性是封闭集合，用它可以一次挡住一整类误判。
+#
+# 真实触发场景：系统自己推荐的第一个问题「汉中的气候怎么样，什么季节去最合适？」
+# 被判定成"知识库未覆盖"而拒答，因为 jieba 把"最合适"标成 a（形容词）、
+# 语料里当然没有这个词。推荐你问、又拒绝回答，是很刺眼的缺陷。
+NON_TOPIC_FLAGS = frozenset(
+    {
+        "a", "ad", "an", "ag",      # 形容词：最合适、更方便
+        "d", "df",                  # 副词：很、都
+        "r", "rr", "rz", "ry",      # 代词：怎么、哪里、什么
+        "m", "mq", "q", "mq",       # 数词与量词：多少、几家
+        "t", "tg",                  # 时间词：今天、最近
+        "c", "cc",                  # 连词：可以、而且
+        "p", "pba", "pbei",         # 介词：从、把
+        "u", "uj", "ul", "uz", "y",  # 助词与语气词：的、了、吗
+        "e", "o", "h", "k", "x", "w", "f", "zg",
     }
 )
 
@@ -148,27 +183,31 @@ class LexicalIndex:
     # ---- 主题缺口 ----
 
     def topic_gaps(self, question: str) -> list[str]:
-        """找出问题里"语料完全没写过"的实词。
+        """找出问题里"语料完全没写过"的主题词。
 
-        判定一个词是缺口，要同时满足三条：
+        判定一个词是缺口，要同时满足四条：
 
         1. 长度 >= 2 —— 单字多是虚词或分词碎片，不足以判断主题；
-        2. 不在疑问词表里 —— "多大""多久""什么样"缺失不代表知识库有缺口；
-        3. 它自己不在语料里，**且它的 2 字子串也一个都不在** ——
-           这一条用来放过"已知词组合成的新词"：问"汉中盆地有多大"，
-           "汉中盆地"整体没出现过，但它由"汉中""盆地"组成，属于知识库覆盖范围；
-           而"恐龙""地铁""护照"的 2 字子串同样不存在，是真的缺口。
+        2. 不在疑问词表里，**且词性不属于 NON_TOPIC_FLAGS** ——
+           "多大""多久""最合适"缺失只说明问法，不代表知识库有缺口；
+        3. 它自己不在语料里；
+        4. 它也不是"已知词拼出来的新词"：能拆成两个语料里都出现过的词就放过。
+           问"汉中盆地有多大"，"汉中盆地"整体没出现过，但拆成"汉中"+"盆地"
+           都在语料里，属于覆盖范围；而"恐龙""地铁"怎么拆都拆不出来，是真缺口。
 
         返回空列表表示"知识库大概率覆盖这个问题"。
         """
+        expanded = expand(question)
+        flags = _pos_flags(expanded)
         gaps: list[str] = []
-        for word in _segment(expand(question)):
+        for word in _segment(expanded):
             if len(word) < 2 or word in QUESTION_WORDS:
+                continue
+            if flags.get(word, "") in NON_TOPIC_FLAGS:
                 continue
             if self.df.get(word, 0) > 0:
                 continue
-            sub_pairs = [word[i : i + 2] for i in range(len(word) - 1)]
-            if any(self.df.get(pair, 0) > 0 for pair in sub_pairs):
+            if _composed_of_known(word, self.df):
                 continue
             gaps.append(word)
         return gaps
@@ -180,6 +219,22 @@ class LexicalIndex:
             "terms": len(self.df),
             "avg_tokens": int(self.avgdl),
         }
+
+
+def _composed_of_known(word: str, df: Mapping[str, int]) -> bool:
+    """word 能否拆成两段、且两段都在语料里出现过。
+
+    用来放过"已知词组合成的新词"。比原来"任一 2 字子串命中"更准：
+    后者会被偶然出现的跨词片段骗过 —— "上市公司"的 2 字子串里有"市公"，
+    它恰好来自语料中"城市公共…"这类文字，于是整词被当成已知词组合放过，
+    而"上市公司"确实一个字都没在语料里出现过。
+    实测这一改动把反例漏过从 1 条降到 0 条，且不影响 26 条正例。
+    """
+    # 从 2 开始：左侧至少 2 字，才有意义（单字多是碎片）
+    for i in range(2, len(word) - 1):
+        if df.get(word[:i], 0) > 0 and df.get(word[i:], 0) > 0:
+            return True
+    return False
 
 
 def _segment(text: str) -> list[str]:
@@ -199,6 +254,26 @@ def _segment(text: str) -> list[str]:
             continue
         if any("\u4e00" <= ch <= "\u9fff" or ch.isalnum() for ch in word):
             out.append(word.lower())
+    return out
+
+
+def _pos_flags(text: str) -> dict[str, str]:
+    """词 -> 词性。单独用 posseg 跑一遍，**只借词性，不用它的词边界**。
+
+    为什么不直接把 _segment 换成 posseg.cut：实测两者词边界并不完全一致
+    （22 条问句里 3 条不同，且 posseg 会把领域词切碎 —— "汉中仙毫"切成"仙""毫"）。
+    换实现会连带改变"什么算缺口"的判定，而那是已经验收过的行为，不能顺手改。
+
+    所以边界仍由 _segment 决定；posseg 切不出来的词在字典里查不到，
+    按"可能是主题词"处理（保守，宁可多判一个缺口也不放过真缺口）。
+    """
+    import jieba.posseg as pseg
+
+    out: dict[str, str] = {}
+    for pair in pseg.cut(text):
+        word = pair.word.strip().lower()
+        if word:
+            out.setdefault(word, pair.flag)
     return out
 
 

@@ -188,7 +188,7 @@ class QaService:
         manifest = self.store.manifest()
         by_type = manifest.get("by_type", {})
         scope = (
-            f"当前知识库覆盖 {self.settings.city} 的地理气候、历史文化、生态与物产等公开资料，"
+            f"当前知识库覆盖 {self.settings.city_name} 的地理气候、历史文化、生态与物产等公开资料，"
             f"以及 {by_type.get('poi', 0)} 个资源点、{by_type.get('experience', 0)} 项乡村体验、"
             f"{by_type.get('product', 0)} 款乡村产品。"
         )

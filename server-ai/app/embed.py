@@ -10,10 +10,17 @@
 所以默认用字符 n-gram 哈希向量：只用标准库 + numpy，完全离线，同一份语料任何时候
 建出来的向量完全一致（可复现）。IDF 在构建期从语料统计并落盘，查询时复用。
 
-**这个向量只用于召回，不用于排序。** 最终排序由 lexical.py 的 BM25 负责，原因是实测出来的：
-余弦要除以文档模长，短文档命中两个无关特征就能赢过长文档命中五个真特征——
-在 26 条检索用例上，纯余弦 top1 命中 12 条，BM25 命中 18 条（见 docs/验收记录-M3.md）。
-向量在这里的职责是"别漏掉"，BM25 的职责是"排对序"。
+**召回与排序的分工，取决于用哪种向量化实现——这条结论换实现后必须重测。**
+
+- 离线 ngram 实现：余弦要除以文档模长，短文档命中两个无关特征就能赢过长文档
+  命中五个真特征，所以纯余弦的 top1 命中**不如** BM25（当初实测 12 条 vs 18 条）。
+- 厂商语义嵌入（实测 BAAI/bge-m3，1024 维）：纯向量 top1 命中 **22/26**，
+  **反超** BM25 的 20/26，两通道互补 8 条。
+
+所以"向量只召回、BM25 排序"这个分工在 ngram 下成立，在 bge-m3 下已经**不是最优**
+（融合排序按互补关系估算可到 25/26）。**当前线上仍按 BM25 排序**——改排序会波及
+全部检索结果，需要单独一轮验收。实测数据与建议见 docs/验收记录-M3.md。
+
 配置了 LLM_EMBEDDING_MODEL 时可以换成厂商的 embedding 接口——两种实现的
 signature 不同，collection 名会跟着变，所以不会把两个模型的向量混进同一个集合。
 """
@@ -197,28 +204,50 @@ class ApiEmbedder:
                     headers={"Authorization": f"Bearer {self.api_key}"},
                     json={"model": self.model, "input": chunk},
                 )
-                resp.raise_for_status()
+                # 不能只靠 raise_for_status()：厂商把真正的原因（"模型不存在"
+                # "余额不足""key 无效"）写在响应体里，而异常消息只带状态码。
+                # 排错时最需要的就是那一行，所以这里把它拼进异常消息。
+                if resp.status_code >= 400:
+                    raise RuntimeError(
+                        f"嵌入接口返回 {resp.status_code}（{self.base_url}/embeddings，"
+                        f"model={self.model}）：{resp.text[:300]}"
+                    )
                 data = sorted(resp.json()["data"], key=lambda d: d["index"])
                 out.extend([d["embedding"] for d in data])
         if out:
             self._dim = len(out[0])
         return out
 
-    def embed(self, text: str) -> list[float]:
+    def embed(self, text: str, *, restrict_vocab: bool = False) -> list[float]:
+        """单条向量化。签名与 `NgramEmbedder.embed` 对齐，供检索层统一调用。
+
+        `restrict_vocab` 在这里是**接受但忽略**的：它表达的是"查询侧只保留语料
+        词表里存在的特征"，那是字符 n-gram 向量空间模型才有的语义——厂商模型有
+        自己的固定词表且不可枚举，没法照做（BGE-M3 这类模型本来也不需要）。
+
+        为什么不让调用方干脆不传：检索层要用同一行代码调两种实现。这里少一个参数
+        的代价是实打实的——`store._vector_candidates` 传了 `restrict_vocab=True`，
+        于是配了厂商嵌入模型之后每次查询都 TypeError，又被检索层的"向量失败就降级"
+        逻辑吞掉，**向量通道实际一次都没生效**，而表面上检索仍然"能用"
+        （BM25 本来就负责排序）。直到做通道消融（纯向量 0/26）才暴露出来。
+        """
         return self.embed_many([text])[0]
 
 
 def create_embedder(settings, idf_path: Path):
     """按配置挑向量化实现。
 
-    配了 LLM_EMBEDDING_MODEL 就用厂商的 embedding 接口，否则用离线实现。
+    配了 LLM_EMBEDDING_MODEL + LLM_EMBEDDING_API_KEY 就用厂商的 embedding 接口，
+    否则用离线实现。注意用的是 **llm_embedding_*** 那组凭证，不是 llm_* ——
+    对话模型与嵌入模型是两家厂商（DeepSeek 没有 embeddings 端点）。
+
     离线实现需要从磁盘恢复 IDF——IDF 是构建期从语料统计出来的，
     查询侧必须用同一份，否则相似度不可比。
     """
-    if settings.llm_embedding_model and settings.llm_api_key:
+    if settings.embedding_enabled:
         return ApiEmbedder(
-            base_url=settings.llm_base_url,
-            api_key=settings.llm_api_key,
+            base_url=settings.llm_embedding_base_url,
+            api_key=settings.llm_embedding_api_key,
             model=settings.llm_embedding_model,
             timeout_s=settings.llm_timeout_s,
         )
@@ -229,10 +258,10 @@ def create_embedder(settings, idf_path: Path):
 
 def fit_embedder(settings, texts: Sequence[str]):
     """构建知识库时使用：API 模式直接用接口，离线模式从语料统计 IDF。"""
-    if settings.llm_embedding_model and settings.llm_api_key:
+    if settings.embedding_enabled:
         return ApiEmbedder(
-            base_url=settings.llm_base_url,
-            api_key=settings.llm_api_key,
+            base_url=settings.llm_embedding_base_url,
+            api_key=settings.llm_embedding_api_key,
             model=settings.llm_embedding_model,
             timeout_s=settings.llm_timeout_s,
         )

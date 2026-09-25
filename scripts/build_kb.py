@@ -3,11 +3,16 @@
 
 用法（在仓库根目录执行）：
     python scripts/build_kb.py                # 用离线向量化重建知识库
+    python scripts/build_kb.py --api          # 用厂商 embedding 接口（需配 LLM_EMBEDDING_API_KEY）
     python scripts/build_kb.py --dump 20      # 只打印前 20 条切片，不建库（核对语料用）
     python scripts/build_kb.py --city hanzhong
 
 知识库是**离线产物**：语料来自 citypack/，向量落盘到 data/vectorstore/。
 改完数据包或 docs/ 之后必须重跑本脚本，否则 /ai/health 会报"语料已变化"。
+
+注意：换了向量化实现（离线 ↔ 厂商、或换 embedding 模型）等于换了特征空间，
+**必须重跑本脚本**。集合名带实现指纹，不重建的话服务会按新指纹去找集合、
+找不到、然后报"还没有构建知识库"。
 
 解释器用哪个：本项目在 Windows 上开发，建议用独立的虚拟环境，
 不要污染系统 Python：
@@ -28,6 +33,12 @@ from app.config import get_settings  # noqa: E402
 from app.corpus import build_chunks  # noqa: E402
 from app.embed import fit_embedder  # noqa: E402
 from app.store import KbStore  # noqa: E402
+
+# --api 且没配 LLM_EMBEDDING_MODEL 时的兜底模型名。
+# 硅基流动上的中文嵌入模型，1024 维。选它的理由：中文强、成熟稳定、
+# **不需要指令前缀**——Qwen3-Embedding 系列要区分查询/文档两种前缀才发挥最佳效果，
+# 而 ApiEmbedder 现在 embed() 与 embed_many() 走同一条路径，加前缀要多一处逻辑。
+DEFAULT_EMBEDDING_MODEL = "BAAI/bge-m3"
 
 
 def main() -> int:
@@ -73,8 +84,22 @@ def main() -> int:
 
     texts = [c.text for c in chunks]
     if args.api:
+        # --api 时 key 是必需的。缺 key 的话 fit_embedder 会**静默**退回离线实现，
+        # 建出来的库和你要的不是一个东西，而日志上只会看到签名不同——很容易忽略。
+        # 这里直接拦住，把问题说清楚。
+        if not settings.llm_embedding_api_key:
+            print(
+                "[build_kb] --api 需要 LLM_EMBEDDING_API_KEY，但它是空的。\n"
+                "           请在仓库根的 .env 里填写（模板见 .env.example）。\n"
+                "           嵌入用硅基流动的 key，跟对话模型的 LLM_API_KEY 不是同一个。",
+                file=sys.stderr,
+            )
+            return 2
         settings = settings.__class__(
-            **{**settings.__dict__, "llm_embedding_model": settings.llm_embedding_model or "text-embedding-v3"}
+            **{
+                **settings.__dict__,
+                "llm_embedding_model": settings.llm_embedding_model or DEFAULT_EMBEDDING_MODEL,
+            }
         )
     embedder = fit_embedder(settings, texts)
     print(f"[build_kb] 向量化实现 {embedder.signature}")
