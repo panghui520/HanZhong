@@ -6,12 +6,21 @@
 -- 而购物车与订单是**运行期数据** —— 用户买过的东西不能因为重启服务就没了。
 -- 不挂 city_code，导入器就永远碰不到它们。
 --
--- ============================================================
--- ⚠️⚠️ 危险：本脚本会**先 DROP 再 CREATE**，不是幂等的建表语句。
--- 重跑一次 = 全部购物车与订单**清空且无法恢复**。
--- 演示机 / 生产环境上执行前，务必先确认是空库，或先备份：
---   mysqldump -uroot -p hanyou_brain cart_item orders order_item > order_backup.sql
--- （原因与 V3 顶部那段说明相同，可对照阅读。）
+-- ✅ 本脚本**幂等**，可以反复执行，不会丢数据：建表用
+--   CREATE TABLE IF NOT EXISTS，表已存在就跳过。
+--
+-- 2026-09-25 之前这里写的是 DROP TABLE IF EXISTS + CREATE TABLE，
+-- 重跑一次会把全部购物车与订单清空且无法恢复。已改掉。
+--
+-- ⚠️ 本脚本**不含 INSERT**，同样是刻意的：
+--   购物车与订单是**运行期数据**，主键指向 user_id 与 product_id，
+--   而 product 的主键由 CityPackImporter 每次导入时重新生成 ——
+--   写死 id 的种子订单在换一次数据包之后就指向错误商品了。
+--   空表就是新环境的正确初始状态，下几笔单就能看到数据。
+--   反过来，想在演示前**清空**这些运行期数据，用 db/reset-runtime-data.sql。
+--
+-- ⚠️ 幂等的代价：表结构变更不会再自动生效。加字段请新开 V 文件写 ALTER TABLE ——
+--   订单状态流转就是这么做的，见 db/V6__m6_order_flow.sql。
 -- ============================================================
 --
 -- 为什么不做「库存扣减」：
@@ -42,8 +51,7 @@ USE hanyou_brain;
 -- 刻意**不存价格**：价格随时可能变，购物车显示的价格应该永远是
 -- "现在的价格"。价格只在**下单那一刻**被快照进 order_item。
 -- ------------------------------------------------------------
-DROP TABLE IF EXISTS cart_item;
-CREATE TABLE cart_item (
+CREATE TABLE IF NOT EXISTS cart_item (
   id         BIGINT   NOT NULL AUTO_INCREMENT COMMENT '主键',
   user_id    BIGINT   NOT NULL COMMENT '-> app_user.id。购物车必须登录才有，不做匿名车',
   product_id VARCHAR(32) NOT NULL COMMENT '-> product.id',
@@ -72,8 +80,7 @@ CREATE TABLE cart_item (
 -- order_no 是对外可见的单号（HY + 日期 + 随机段），
 -- 主键 id 只在内部用。让用户念一串自增数字很容易和别的系统撞号。
 -- ------------------------------------------------------------
-DROP TABLE IF EXISTS orders;
-CREATE TABLE orders (
+CREATE TABLE IF NOT EXISTS orders (
   id               BIGINT       NOT NULL AUTO_INCREMENT COMMENT '主键',
   order_no         VARCHAR(32)  NOT NULL COMMENT '对外单号，形如 HY20260925004217',
   user_id          BIGINT       NOT NULL COMMENT '-> app_user.id，下单人',
@@ -116,8 +123,7 @@ CREATE TABLE orders (
 -- 刻意不存 image_path：图片是可变的展示物，不该进订单快照；
 -- 需要显示时按 product_id 现查 M9 的配图。
 -- ------------------------------------------------------------
-DROP TABLE IF EXISTS order_item;
-CREATE TABLE order_item (
+CREATE TABLE IF NOT EXISTS order_item (
   id              BIGINT        NOT NULL AUTO_INCREMENT COMMENT '主键',
   order_id        BIGINT        NOT NULL COMMENT '-> orders.id',
   product_id      VARCHAR(32)   NOT NULL COMMENT '-> product.id',

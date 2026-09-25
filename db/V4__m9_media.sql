@@ -18,18 +18,22 @@
 --
 -- 执行：mysql -uroot -p --default-character-set=utf8mb4 < db/V4__m9_media.sql
 --
--- ⚠️⚠️ 危险：本脚本会**先 DROP 再 CREATE**，不是幂等的建表语句。
--- 重跑一次 = 运营上传的全部景点配图记录、轮播帧记录**全部清空**。
--- 注意：**磁盘上的图片文件不会跟着删**（脚本管不到文件系统），
--- 结果是磁盘留下一堆没人引用的孤儿文件，页面上所有配图一起消失。
+-- ✅ 本脚本**幂等**，可以反复执行，不会丢数据：
+--   · 建表用 CREATE TABLE IF NOT EXISTS，表已存在就跳过；
+--   · 轮播帧用 INSERT IGNORE 按 scene 去重，已存在就跳过 ——
+--     你上传过的配图、改过的轮播文案都不会被覆盖。
 --
--- 演示机 / 生产环境上执行前，务必先确认：
---   ① 这是一套空库，本来就没有配图要保；
---   ② 或先备份：
---        mysqldump -uroot -p hanyou_brain poi_image site_banner > media_backup.sql
+-- 2026-09-25 之前这里写的是 DROP TABLE IF EXISTS + CREATE TABLE，
+-- 重跑一次会清空运营上传的全部配图记录与轮播帧。注意
+-- **磁盘上的图片文件不会跟着删**（脚本管不到文件系统），
+-- 结果是磁盘留下一堆没人引用的孤儿文件，页面上所有配图一起消失。已改掉。
 --
--- （V1 / V2 重跑同样会 DROP，但那两张表的数据每次启动都会被
---   CityPackImporter 从 citypack/ 重灌，所以没有额外损失。详见 V3 顶部说明。）
+-- ⚠️ 幂等的代价：**表结构变更不会再自动生效**。
+--   今后要给这两张表加字段，必须新开一个 V 文件写 ALTER TABLE，
+--   不要回来改本文件 —— 在本机改了也不生效。
+--
+-- （V1 / V2 建的六张表每次启动都会被 CityPackImporter 从 citypack/ 重灌，
+--   本来就不靠脚本维护数据。详见 V3 顶部说明。）
 -- ============================================================
 
 USE hanyou_brain;
@@ -48,8 +52,7 @@ USE hanyou_brain;
 -- source 记录来源：UPLOAD 为运营上传。留这个字段是为了将来能区分
 -- "系统预置图"与"人工替换图"，做数据清理时有据可依。
 -- ------------------------------------------------------------
-DROP TABLE IF EXISTS poi_image;
-CREATE TABLE poi_image (
+CREATE TABLE IF NOT EXISTS poi_image (
   id         BIGINT       NOT NULL AUTO_INCREMENT COMMENT '主键',
   poi_id     VARCHAR(32)  NOT NULL COMMENT '所属资源点，对应 poi.id',
   image_path VARCHAR(255) NOT NULL
@@ -78,8 +81,7 @@ CREATE TABLE poi_image (
 -- scene 是兜底画面：手写 SVG 的 7 个变体之一。传了图就用图，
 -- 没传图就用它。这样"离线可演示"这条底线在任何状态下都成立。
 -- ------------------------------------------------------------
-DROP TABLE IF EXISTS site_banner;
-CREATE TABLE site_banner (
+CREATE TABLE IF NOT EXISTS site_banner (
   id         BIGINT       NOT NULL AUTO_INCREMENT COMMENT '主键',
   sort_order INT          NOT NULL DEFAULT 0 COMMENT '轮播顺序，小的在前',
   image_path VARCHAR(255)          COMMENT '相对 media-dir 的路径；为空则回落到 scene 的手写 SVG',
@@ -98,20 +100,40 @@ CREATE TABLE site_banner (
   KEY idx_sort (sort_order)
 ) ENGINE=InnoDB COMMENT='首页轮播图（文案与图片均可由运营维护）';
 
--- 种入当前的 4 帧。image_path 全部留空 => 前端继续用手写 SVG 渲染，
+-- 种入当前的 4 帧（幂等）。image_path 全部留空 => 前端继续用手写 SVG 渲染，
 -- 运营上传图片后自动切换为实拍图。
+--
+-- 为什么不用 INSERT IGNORE：site_banner 只有主键，scene 上没有唯一键
+-- （运营完全可以让两帧共用同一个兜底画面），IGNORE 拦不住重复插入，
+-- 重跑一次就变成 8 帧。这里改用 `WHERE NOT EXISTS` 按 scene 判重，
+-- 不依赖唯一键，也就不必为了幂等去改表结构。
+--
+-- 注意判重条件是 scene 而不是 title：运营改了标题之后重跑本脚本，
+-- 不该又冒出一条原标题的帧来。
 INSERT INTO site_banner
   (sort_order, scene, eyebrow, title, subtitle, description, link_url, cta, enabled)
-VALUES
-  (1, 'qinling', '智慧文旅 · 乡村振兴', '汉游智脑', '发现汉中，也发现乡村的新可能',
-   '当景区高位运行，让客流顺着山谷流向乡村。AI 参与的规划、分流与运营，把一次到访延展成一条持续消费链。',
-   '/explore', '探索汉中', 1),
-  (2, 'hanjiang', '汉江之畔 · 一城文脉', '一江汉水，两岸春秋', '从石门栈道到汉家发祥地',
-   '汉中是汉文化的发祥地。我们把散落的景区、街巷、村镇连成可规划的动线，让每一次停留都落在有故事的地方。',
-   '/assistant', '问问智脑', 1),
-  (3, 'rapeseed', '油菜花海 · 乡村体验', '把春天种在田里', '花期之外，乡村仍然值得来',
-   '油菜花、茶园、梯田不只是风景，也是可预约的乡村体验。游客走进来，收益留在村里。',
-   '/explore', '乡村体验', 1),
-  (4, 'hantai', '古汉台 · 东方人文', '檐下百年，一眼千载', '在古建与花树之间读懂汉中',
-   '以东方人文为底色的视觉与内容体系，让文化资源可阅读、可推荐、可被 AI 准确引用。',
-   '/assistant', '了解文脉', 1);
+SELECT 1, 'qinling', '智慧文旅 · 乡村振兴', '汉游智脑', '发现汉中，也发现乡村的新可能',
+       '当景区高位运行，让客流顺着山谷流向乡村。AI 参与的规划、分流与运营，把一次到访延展成一条持续消费链。',
+       '/explore', '探索汉中', 1
+FROM DUAL WHERE NOT EXISTS (SELECT 1 FROM site_banner WHERE scene = 'qinling');
+
+INSERT INTO site_banner
+  (sort_order, scene, eyebrow, title, subtitle, description, link_url, cta, enabled)
+SELECT 2, 'hanjiang', '汉江之畔 · 一城文脉', '一江汉水，两岸春秋', '从石门栈道到汉家发祥地',
+       '汉中是汉文化的发祥地。我们把散落的景区、街巷、村镇连成可规划的动线，让每一次停留都落在有故事的地方。',
+       '/assistant', '问问智脑', 1
+FROM DUAL WHERE NOT EXISTS (SELECT 1 FROM site_banner WHERE scene = 'hanjiang');
+
+INSERT INTO site_banner
+  (sort_order, scene, eyebrow, title, subtitle, description, link_url, cta, enabled)
+SELECT 3, 'rapeseed', '油菜花海 · 乡村体验', '把春天种在田里', '花期之外，乡村仍然值得来',
+       '油菜花、茶园、梯田不只是风景，也是可预约的乡村体验。游客走进来，收益留在村里。',
+       '/explore', '乡村体验', 1
+FROM DUAL WHERE NOT EXISTS (SELECT 1 FROM site_banner WHERE scene = 'rapeseed');
+
+INSERT INTO site_banner
+  (sort_order, scene, eyebrow, title, subtitle, description, link_url, cta, enabled)
+SELECT 4, 'hantai', '古汉台 · 东方人文', '檐下百年，一眼千载', '在古建与花树之间读懂汉中',
+       '以东方人文为底色的视觉与内容体系，让文化资源可阅读、可推荐、可被 AI 准确引用。',
+       '/assistant', '了解文脉', 1
+FROM DUAL WHERE NOT EXISTS (SELECT 1 FROM site_banner WHERE scene = 'hantai');

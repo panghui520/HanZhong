@@ -12,23 +12,24 @@
 --
 -- 执行：mysql -uroot -p < db/V3__m8_auth.sql
 --
--- ⚠️⚠️ 危险：本脚本会**先 DROP 再 CREATE**，不是幂等的建表语句。
--- 重跑一次 = 所有已注册用户、所有历史验证码**全部清空**，且无法恢复。
--- 2026-09-25 已真实发生过一次：重跑本脚本把 25 个账号全部抹掉。
+-- ✅ 本脚本**幂等**，可以反复执行，不会丢数据：
+--   · 建表用 CREATE TABLE IF NOT EXISTS，表已存在就跳过；
+--   · 演示账号用 INSERT IGNORE，邮箱已存在就整行跳过，
+--     所以你后来改过的密码、昵称都不会被覆盖。
 --
--- 演示机 / 生产环境上执行前，务必先确认下面两件事之一：
---   ① 这是一套空库，本来就没有账号要保；
---   ② 已经先把 app_user 导出来了：
---        mysqldump -uroot -p hanyou_brain app_user > app_user_backup.sql
+-- 2026-09-25 之前这里写的是 DROP TABLE IF EXISTS + CREATE TABLE，
+-- 重跑一次会把账号全部抹掉（当天真实发生过一次，25 个账号没了）。已改掉。
 --
--- 为什么 V1 / V2 重跑没这个风险，V3 / V4 有：
---   四个脚本的写法**完全一样**（都是 DROP TABLE IF EXISTS + CREATE TABLE），
---   但 V1/V2 建的是 city_profile / poi / poi_relation / experience / product /
---   product_category —— 这些表每次启动都会被 CityPackImporter 按 city_code
---   全量重灌，重跑脚本等于提前做了一次同样的动作，没有额外损失。
---   而 app_user / auth_email_code（本脚本）与 poi_image / site_banner（V4）
---   **刻意不带 city_code**，不被导入器碰，是纯运行期数据 ——
---   一旦 DROP 就真的没了。
+-- ⚠️ 幂等的代价：**表结构变更不会再自动生效**。
+--   CREATE TABLE IF NOT EXISTS 遇到已存在的表只会跳过，不会补字段。
+--   今后要给这两张表加字段，必须**新开一个 V 文件写 ALTER TABLE**，
+--   不要回来改本文件 —— 在本机改了也不生效，只会让新环境与旧环境结构不一致。
+--
+-- 同理，V1/V2 建的是 city_profile / poi / poi_relation / experience /
+-- product / product_category，这些表每次启动都会被 CityPackImporter 按
+-- city_code 全量重灌，本来就不需要靠脚本维护数据；而 app_user /
+-- auth_email_code（本脚本）与 poi_image / site_banner（V4）刻意不带
+-- city_code，是纯运行期数据，所以它们的**表结构**只能靠 ALTER 演进。
 -- ============================================================
 
 USE hanyou_brain;
@@ -51,8 +52,7 @@ USE hanyou_brain;
 --
 -- 3) 不建外键（与 M1/M2 一致），引用完整性由服务层保证。
 -- ------------------------------------------------------------
-DROP TABLE IF EXISTS app_user;
-CREATE TABLE app_user (
+CREATE TABLE IF NOT EXISTS app_user (
   id            BIGINT       NOT NULL AUTO_INCREMENT COMMENT '主键',
   email         VARCHAR(128) NOT NULL COMMENT '登录邮箱，统一转小写后存储',
   password_hash VARCHAR(72)           COMMENT 'BCrypt 哈希（60 字符），NULL = 尚未设置密码',
@@ -88,8 +88,7 @@ CREATE TABLE app_user (
 -- 所以真正的防线是"5 分钟 + 5 次错误上限"，哈希在这里只是防明文泄漏。
 -- 用固定盐的 SHA-256 即可：可查询、不可逆。
 -- ------------------------------------------------------------
-DROP TABLE IF EXISTS auth_email_code;
-CREATE TABLE auth_email_code (
+CREATE TABLE IF NOT EXISTS auth_email_code (
   id            BIGINT      NOT NULL AUTO_INCREMENT COMMENT '主键',
   email         VARCHAR(128) NOT NULL COMMENT '目标邮箱，统一转小写',
   code_hash     CHAR(64)    NOT NULL COMMENT 'SHA-256(邮箱 + 验证码 + 固定盐) 的十六进制，不存明文',
@@ -106,3 +105,39 @@ CREATE TABLE auth_email_code (
   -- 校验与冷却查询都是"按邮箱取最近一条"，这个索引直接命中
   KEY idx_email_purpose_created (email, purpose, created_at)
 ) ENGINE=InnoDB COMMENT='邮箱验证码（后端生成、后端校验，前端不参与判定）';
+
+-- ------------------------------------------------------------
+-- 演示账号（幂等）
+--
+-- 用 INSERT IGNORE 靠 uk_email 唯一键实现幂等：邮箱已存在就整行跳过，
+-- 因此**不会覆盖**你后来改过的密码或昵称。重跑一百遍结果一样。
+--
+-- password_hash 是 BCrypt（$2a$10$ 开头，60 字符），与 AuthService 登录时
+-- 的校验方式一致。下面 4 个哈希就是本机当前在用的值，
+-- 所以**密码与你现在登录用的完全一样**，不需要重新记。
+--
+-- role='OPERATOR' 只能靠 SQL 设置：注册接口写死 GUEST，不接受前端传值
+-- （见 AuthService.doRegister）。所以运营账号必须在这里种，
+-- 否则新环境里没人能进管理端。
+--
+-- 需要统一重置密码时（例如换了演示机、忘了旧密码）：
+--   把下面这段的注释去掉，把 $2a$10$... 换成新密码的 BCrypt 哈希。
+--   UPDATE app_user SET password_hash = '$2a$10$在此填入新哈希'
+--    WHERE email IN ('admin@hanyou.local','visitor1@hanyou.local',
+--                    'visitor2@hanyou.local','visitor3@hanyou.local');
+-- ------------------------------------------------------------
+INSERT IGNORE INTO app_user
+  (email, password_hash, nickname, role, status, email_verified)
+VALUES
+  ('admin@hanyou.local',
+   '$2a$10$ht9v4gy8TizsW2NCxWWlhORaR7AjRVL3.4MJknhgewyIObm4bkWUy',
+   '运营管理员', 'OPERATOR', 'ACTIVE', 1),
+  ('visitor1@hanyou.local',
+   '$2a$10$F1dsIet/zpU4AlTnlr0sHeOPbMOyh5UzV3B7HE4x6QtnPw6/mxSOG',
+   '游客甲', 'GUEST', 'ACTIVE', 1),
+  ('visitor2@hanyou.local',
+   '$2a$10$L8IWxk02PwjwM.RllfH/2eXyhlfAenLDbdVbBNKJhIxKETiUigv.y',
+   '游客乙', 'GUEST', 'ACTIVE', 1),
+  ('visitor3@hanyou.local',
+   '$2a$10$YRl87Gcv9iRp8f4tjoIk5e86F.SQwNz56.P0HxQiiJ4sRAZ21K99G',
+   '游客丙', 'GUEST', 'ACTIVE', 1);

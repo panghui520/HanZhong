@@ -2,6 +2,17 @@
 -- M2 乡村体验与农产品
 -- 依赖 M1 的 poi 表：experience.poi_id、product.poi_id 均指向 poi.id
 -- 执行：mysql -uroot -p < db/V2__m2_experience_product.sql
+--
+-- ✅ 本脚本**幂等**，可以反复执行：建表用 CREATE TABLE IF NOT EXISTS，
+--   表已存在就跳过，不会删数据。
+--
+-- ⚠️ 本脚本**不含 INSERT**，与 V1 同理（详见 V1 顶部说明）：
+--   product_category / experience / product 的数据由后端启动时的
+--   CityPackImporter 从 citypack/hanzhong/ 导入，那是唯一来源。
+--   在 DataGrip 里单独跑完本文件，这三张表是空的，属正常现象。
+--   核对：experience 应为 14 条、product 应为 16 条。
+--
+-- ⚠️ 幂等的代价：表结构变更不会再自动生效。加字段请新开 V 文件写 ALTER TABLE。
 -- ============================================================
 
 USE hanyou_brain;
@@ -9,8 +20,7 @@ USE hanyou_brain;
 -- ------------------------------------------------------------
 -- 产品分类。parent_code 留给后续二级分类，当前数据只有一级
 -- ------------------------------------------------------------
-DROP TABLE IF EXISTS product_category;
-CREATE TABLE product_category (
+CREATE TABLE IF NOT EXISTS product_category (
   code        VARCHAR(32)  NOT NULL COMMENT '分类编码，如 CAT-TEA',
   city_code   VARCHAR(32)  NOT NULL COMMENT '所属城市',
   name        VARCHAR(64)  NOT NULL COMMENT '分类名，如 茶叶',
@@ -26,8 +36,7 @@ CREATE TABLE product_category (
 -- 乡村体验项目：游客在乡村点"可以做的事"
 -- 它是整条消费链的锚点——每一款产品都要能追溯到一次具体体验
 -- ------------------------------------------------------------
-DROP TABLE IF EXISTS experience;
-CREATE TABLE experience (
+CREATE TABLE IF NOT EXISTS experience (
   id           VARCHAR(32)   NOT NULL COMMENT '体验编码，如 E-001',
   city_code    VARCHAR(32)   NOT NULL COMMENT '所属城市',
   poi_id       VARCHAR(32)   NOT NULL COMMENT '所属乡村点（-> poi.id）',
@@ -58,8 +67,7 @@ CREATE TABLE experience (
 -- 产地与体验锚点至少一项非空。所以库里不可能存在"孤立商品"，
 -- 前端也就不存在独立商城页面的数据基础。
 -- ------------------------------------------------------------
-DROP TABLE IF EXISTS product;
-CREATE TABLE product (
+CREATE TABLE IF NOT EXISTS product (
   id             VARCHAR(32)   NOT NULL COMMENT '产品编码，如 PRD-001',
   city_code      VARCHAR(32)   NOT NULL COMMENT '所属城市',
   poi_id         VARCHAR(32)            COMMENT '产地乡村点（-> poi.id）',
