@@ -55,7 +55,11 @@ const aiStatus = computed(() => {
 })
 
 const scopeText = computed(() => {
-  const by = health.value?.by_type ?? {}
+  // 用 by_type_docs（文档数）而不是 by_type（切片数）：
+  // 这里的单位是"篇/个/项/款"，是**条数**口径。长文档会切成多片，
+  // 语料扩到 151 片后 city_doc 有 79 片却只有 20 篇，
+  // 用切片数会显示成"79 篇城市知识"。
+  const by = health.value?.by_type_docs ?? {}
   const parts = [
     ['poi', '个资源点'],
     ['experience', '项乡村体验'],
@@ -69,7 +73,7 @@ const scopeText = computed(() => {
 
 /** 侧栏用不到 0 值的项，但欢迎区要展示完整的覆盖数字 */
 const scopeAll = computed(() => {
-  const by = health.value?.by_type ?? {}
+  const by = health.value?.by_type_docs ?? {}
   return [
     { key: 'city_doc', label: '城市知识', unit: '篇', value: by.city_doc ?? 0 },
     { key: 'poi', label: '统一资源', unit: '处', value: by.poi ?? 0 },

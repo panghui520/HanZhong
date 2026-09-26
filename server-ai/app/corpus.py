@@ -17,7 +17,7 @@
 
 **来源分三档**（`source_kind`，随元数据一路传到前端的来源卡片）：
 
-- `detail` —— 8 篇手写文档，front-matter 里各自带真实深链，可点开核对
+- `detail` —— 12 篇手写文档，front-matter 里各自带真实深链，可点开核对
 - `site`   —— 42 个资源点，只有站点级参考。数据包里的 source_url 全是
   `http://wl.hanzhong.gov.cn/`，而那是文旅局的**新闻/公告门户**，
   站上并没有"汉中热面皮（老字号）"这类独立页面。如实标 site，
@@ -98,6 +98,10 @@ def _snippet(text: str, limit: int = SNIPPET_LIMIT) -> str:
     # 压平空白后会变成"……平坝。 - 北面与宝鸡市……"，看着像没处理干净。
     body = re.sub(r"^[ \t]*[-*+]\s+", "", body, flags=re.MULTILINE)
     body = re.sub(r"^[ \t]*\d+[.)]\s+", "", body, flags=re.MULTILINE)
+    # 去掉强调记号。来源卡片直接显示 snippet，`**面皮**` 会把星号原样印出来。
+    # 先配对替换再兜底清残留（未闭合的 `**` 走不到第一句）。
+    body = re.sub(r"\*\*(.+?)\*\*", r"\1", body, flags=re.DOTALL)
+    body = body.replace("**", "")
     body = re.sub(r"\s+", " ", body).strip()
     if len(body) <= limit:
         return body

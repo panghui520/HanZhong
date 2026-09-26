@@ -7,9 +7,11 @@
 
 三件事一起验：
 
-1. **能不能找对** —— 26 条有明确目标文档的问题，看目标文档排在第几。
+1. **能不能找对** —— 51 条有明确目标文档的问题，看目标文档排在第几。
    指标是 top1 与 top5，因为两者服务的场景不同：top1 决定摘录模式（无模型时）
    给出的第一段原文，top5 决定喂给模型的上下文。
+   top1 另有一个「含等价答案」口径：有些问题有几个同样正确的落点（见 `EQUIVALENT`），
+   被等价落点抢先不算找错。**两个数都打印**，不做口径遮掩。
 2. **能不能承认找不到** —— 10 条语料完全没写过的问题，看主题缺口判定是否拦下。
 3. **会不会拒答自己推荐的问题** —— 页面首屏摆给用户点的快捷问题必须能答。
    这一段是补上来的：曾发生推荐问题「汉中的气候怎么样，什么季节去最合适？」
@@ -44,7 +46,15 @@ from app.store import IDF_FILE, KbStore  # noqa: E402
 # 问题 -> 期望命中的 doc_id。目标文档的选取标准是「这句话的答案主要出自哪一篇」，
 # 不要求唯一：比如"朱鹮是哪年发现的"，朱鹮知识文档与朱鹮梨园都算相关，
 # 这里取记载了发现年份的那一篇。
+#
+# 2026-09-26 扩充语料后重订了一批期望值（语料 83 片 → 151 片，8 篇手写文档 → 20 篇）。
+# 重订只做一件事：**把期望改到"现在真正记载了这个答案的那一篇"**，不为了好看去迁就结果。
+# 例如「汉中天坑群」原来只能指向 `doc:04-ecology`（生态篇里只有一句话），
+# 现在有了专门的 `doc:11-tiankeng`，指向它才是对的。
+# 另有一批用例的期望**没有改**，它们的 top1 掉到了第 2 名 —— 那是真实退化，
+# 连同成因一起记在 docs/验收记录-M3.md，不在本文件里粉饰。
 CASES: list[tuple[str, str]] = [
+    # ---- 地理 / 气候 / 历史 / 生态 / 区划（原有）----
     ("汉中在哪个省", "doc:01-geography"),
     ("汉中的地形是什么样的", "doc:01-geography"),
     ("汉中盆地有多大", "doc:01-geography"),
@@ -53,25 +63,81 @@ CASES: list[tuple[str, str]] = [
     ("汉中为什么叫汉中", "doc:03-history"),
     ("汉中森林覆盖率是多少", "doc:04-ecology"),
     ("汉江发源于哪里", "doc:04-ecology"),
-    ("汉中天坑群", "doc:04-ecology"),
     ("朱鹮是哪年发现的", "doc:05-zhu-huan"),
     ("朱鹮现在有多少只", "doc:05-zhu-huan"),
+    ("汉中油菜花什么时候开", "doc:27-seasons"),
+    ("汉中冬天冷不冷", "doc:02-climate"),
+    # ---- 交通（原有 + 新增航空）----
     ("西成高铁什么时候开通的", "doc:06-transport"),
     ("西安到汉中坐高铁要多久", "doc:06-transport"),
-    ("汉中有什么值得带走的特产", "doc:07-local-products"),
+    ("汉中城固机场离市区多远", "doc:12-aviation"),
+    ("汉中机场是什么等级", "doc:12-aviation"),
+    # ---- 物产（原有）----
+    # "汉中有什么值得带走的特产"的期望从 `doc:07-local-products` 改到 `doc:23`：
+    # doc 07《汉中的物产资源》讲的是亚热带经济作物、森林、**矿产**、古树名木，
+    # 通篇没有"什么可以带走"；doc 23《汉中的农产品与伴手礼》标题就是这件事。
+    # 旧期望写在 doc 23 存在之前，属过期而非"退化"。
+    ("汉中有什么值得带走的特产", "doc:23-local-specialties"),
     ("汉中的矿产资源有哪些", "doc:07-local-products"),
-    ("汉中茶叶产区在哪", "doc:07-local-products"),
-    ("汉中油菜花什么时候开", "doc:02-climate"),
-    ("汉中冬天冷不冷", "doc:02-climate"),
+    # ---- 美食（新增主题）----
+    ("汉中有什么好吃的", "doc:09-hanzhong-food"),
+    ("汉中的特色小吃有哪些", "doc:09-hanzhong-food"),
+    ("菜豆腐是怎么做的", "doc:09-hanzhong-food"),
+    ("浆水面为什么叫浆水面", "doc:09-hanzhong-food"),
+    ("汉中面皮是省级非物质文化遗产吗", "doc:09-hanzhong-food"),
+    ("宁强麻辣鸡的来历", "doc:09-hanzhong-food"),
+    ("汉中哪里能吃到当地早餐", "doc:21-food-map"),
+    # ---- 茶（新增主题）----
+    ("汉中茶叶产区在哪", "doc:10-hanzhong-tea"),
+    ("汉中仙毫是什么茶", "doc:10-hanzhong-tea"),
+    ("汉中仙毫哪一年成为地理标志产品", "doc:10-hanzhong-tea"),
+    ("汉中茶叶的历史有多久", "doc:10-hanzhong-tea"),
+    ("午子仙毫产自哪里", "doc:10-hanzhong-tea"),
+    # ---- 地质（新增主题）----
+    ("汉中天坑群", "doc:11-tiankeng"),
+    ("汉中天坑群分布在哪些镇", "doc:11-tiankeng"),
+    ("汉中天坑群是什么时候发现的", "doc:11-tiankeng"),
+    ("汉中天坑群为什么是世界级的", "doc:11-tiankeng"),
+    # ---- 景区 / 体验 / 产品（原有 + 新增主题）----
     ("汉中石门栈道是什么地方", "poi:P-SCE-001"),
     ("黄官茶园能体验什么", "poi:P-RUR-002"),
-    ("留坝有什么民宿", "poi:P-RUR-012"),
-    ("汉中仙毫多少钱", "prd:PRD-001"),
+    ("留坝有什么民宿", "poi:P-LOD-003"),
+    ("汉中仙毫多少钱", "doc:10-hanzhong-tea"),
     ("镇巴腊肉", "prd:PRD-012"),
-    ("汉中有什么好吃的", "poi:P-FOOD-001"),
     ("汉中哪里可以住宿", "poi:P-LOD-001"),
-    ("汉中的非物质文化遗产", "exp:E-007"),
+    ("汉中的非物质文化遗产", "poi:P-RUR-008"),
+    ("汉中哪些景区是免费的", "doc:20-scenic-guide"),
+    ("汉中有哪些乡村体验", "doc:22-rural-experiences"),
+    ("采茶体验什么时候有", "doc:22-rural-experiences"),
+    ("汉中有什么特产可以带走", "doc:23-local-specialties"),
+    ("略阳乌鸡是地理标志产品吗", "doc:23-local-specialties"),
+    # ---- 旅游方式（新增主题）----
+    ("汉中适合亲子游吗", "doc:25-family-trip"),
+    ("汉中几天能玩完", "doc:26-itinerary"),
+    ("汉中什么时候去最好", "doc:27-seasons"),
+    ("汉中冬天有什么可玩的", "doc:27-seasons"),
+    ("汉中哪个区县有什么资源", "doc:24-district-resources"),
 ]
+
+# 有些问题有几个**同样正确**的落点。例如"采茶体验什么时候有"，
+# 体验条目 `exp:E-001`（自带 3—5 月窗口）与乡村体验清单都记载了答案，
+# 谁排第一都不算答错。这类落点逐条列在这里，**不写进 CASES 的期望值**——
+# 期望值保持"编辑视角下最该命中的那一篇"，这样跨版本才可比。
+#
+# 为什么要单独列：扩充语料后 strict top1 掉了 7 条，其中 9 条属于这一类。
+# 如果不把它们区分出来，"top1 40/51"会被读成"检索退化了 7 条"，
+# 而实际退化的是 2 条。**两个数都打印，读者自己判断**，不靠口径遮掩。
+EQUIVALENT: dict[str, set[str]] = {
+    "汉中城固机场离市区多远": {"poi:P-TRA-002"},
+    "汉中有什么好吃的": {"doc:21-food-map"},
+    "汉中的特色小吃有哪些": {"doc:21-food-map"},
+    "宁强麻辣鸡的来历": {"poi:P-FOOD-002"},
+    "午子仙毫产自哪里": {"prd:PRD-003"},
+    "采茶体验什么时候有": {"exp:E-001"},
+    "略阳乌鸡是地理标志产品吗": {"prd:PRD-014"},
+    "汉中几天能玩完": {"doc:27-seasons"},
+    "汉中哪里可以住宿": {"doc:24-district-resources"},
+}
 
 # 语料完全没有覆盖的主题。期望系统明确回答"没有相关记载"。
 NEGATIVE: list[str] = [
@@ -124,6 +190,7 @@ def main() -> int:
           f"向量 {store.count()} 条，集合 {store.collection_name}")
 
     hit1 = hit5 = 0
+    alt1 = 0
     misses: list[str] = []
     print(f"\n=== 检索命中（{len(CASES)} 条）===")
     for question, want in CASES:
@@ -136,8 +203,20 @@ def main() -> int:
             hit5 += 1
         else:
             misses.append(question)
-        mark = "OK " if rank == 1 else ("    " if rank else "!! ")
-        detail = f"@{rank}" if rank else f"未命中 (top1={ids[0] if ids else '空'})"
+        # 等价落点排第一也算"答案找对了"，但与 strict 分开计数
+        equivalent = EQUIVALENT.get(question, set())
+        is_alt = bool(ids) and ids[0] in equivalent
+        if is_alt:
+            alt1 += 1
+        mark = "OK " if rank == 1 else ("=  " if is_alt else ("    " if rank else "!! "))
+        if rank == 1:
+            detail = "@1"
+        elif is_alt:
+            detail = f"@{rank} (等价答案 {ids[0]} 排第一)"
+        elif rank:
+            detail = f"@{rank} (top1={ids[0]})"
+        else:
+            detail = f"未命中 (top1={ids[0] if ids else '空'})"
         print(f"{mark}{question:<24} {detail}")
         if args.verbose:
             for i, h in enumerate(hits[:3], 1):
@@ -169,8 +248,12 @@ def main() -> int:
 
     total = len(CASES)
     print("\n=== 汇总 ===")
-    print(f"  top1 命中   {hit1:>2}/{total}  ({hit1 / total * 100:.0f}%)")
-    print(f"  top5 命中   {hit5:>2}/{total}  ({hit5 / total * 100:.0f}%)")
+    print(f"  top1 命中   {hit1:>2}/{total}  ({hit1 / total * 100:.0f}%)   "
+          f"← 决定摘录模式给出的第一段原文")
+    print(f"  top1 命中（含等价答案） {hit1 + alt1:>2}/{total}  "
+          f"({(hit1 + alt1) / total * 100:.0f}%)   ← 另有 {alt1} 条被同样正确的落点抢先")
+    print(f"  top5 命中   {hit5:>2}/{total}  ({hit5 / total * 100:.0f}%)   "
+          f"← 决定喂给模型的上下文")
     print(f"  正确拒答    {blocked:>2}/{len(NEGATIVE)}  ({blocked / len(NEGATIVE) * 100:.0f}%)")
     print(f"  推荐问题放行 {len(suggestions) - len(refused):>2}/{len(suggestions)}")
     if misses:

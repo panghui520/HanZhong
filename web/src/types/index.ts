@@ -155,7 +155,7 @@ export const QA_MODE_LABEL: Record<QaMode, string> = {
 
 /**
  * 来源性质。决定来源卡片给什么标签、给不给外链：
- *   detail  —— 有可核对的具体页面（8 篇手写文档，front-matter 里带真实深链）
+ *   detail  —— 有可核对的具体页面（12 篇手写文档，front-matter 里带真实深链）
  *   site    —— 只有站点级参考：该站不提供这一条的独立页面
  *   dataset —— 项目数据包自有，外部没有对应出处
  *
@@ -238,6 +238,8 @@ export interface AiHealth {
   chunks: number
   docs: number
   by_type: Record<string, number>
+  /** 按**文档数**的类型分布。`by_type` 是切片数，界面上的"篇/处/项/款"要用这个 */
+  by_type_docs: Record<string, number>
   embedder: string
   lexical: { chunks: number; terms: number; avg_tokens: number }
   llm_configured: boolean

@@ -98,7 +98,11 @@ class QaService:
             "city": self.settings.city,
             "chunks": self.store.count(),
             "docs": manifest.get("docs", 0),
+            # by_type 是**切片**数，by_type_docs 是**文档**数。
+            # 前端"知识库里有这些"要显示"20 篇城市知识 / 42 处资源点"，
+            # 用的是 by_type_docs；by_type 留给侧栏的"切片"口径。
             "by_type": manifest.get("by_type", {}),
+            "by_type_docs": manifest.get("by_type_docs", {}),
             "embedder": self.store.embedder.signature,
             "lexical": self.store.lexical.coverage(),
             "llm_configured": self.settings.llm_enabled,

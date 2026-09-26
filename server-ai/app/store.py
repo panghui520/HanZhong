@@ -228,6 +228,11 @@ class KbStore:
                     "chunks": len(chunks),
                     "docs": len({c.doc_id for c in chunks}),
                     "by_type": _count_by_type(chunks),
+                    # 按**文档**数的类型分布。`by_type` 是切片数，两者差别随文档变长而拉大
+                    # （语料 151 片 / 92 篇时，city_doc 是 79 片但只有 20 篇）。
+                    # 前端"知识库里有这些"那一栏写的是"篇/处/项/款"，必须用这个数，
+                    # 否则会显示成"79 篇城市知识"。
+                    "by_type_docs": _count_docs_by_type(chunks),
                     "by_source_kind": _count_by_source_kind(chunks),
                     "fingerprint": corpus_fingerprint(chunks, embedder.signature),
                 },
@@ -315,8 +320,8 @@ class KbStore:
         实测 RRF 排序后首条的 BM25 归一化分落在 19%~78%、**没有一条为 0**，
         所以展示口径不需要跟着改。`Hit.fusion` 才是排序键。
 
-        候选池 = 向量 top-pool ∪ BM25 top-pool。当前语料只有 83 片、pool 取 20，
-        实测与全量 BM25 的 top5 命中完全一致；语料长大后 pool 才真正起到限流作用。
+        候选池 = 向量 top-pool ∪ BM25 top-pool。语料 151 片、pool 取 20 时，
+        实测与全量 BM25 的 top5 命中仍然一致；语料再长大 pool 才真正起到限流作用。
         """
         if self.count() == 0 or not self.lexical.chunks:
             return []
@@ -412,6 +417,18 @@ def _count_by_type(chunks: Sequence[Chunk]) -> dict[str, int]:
     for chunk in chunks:
         counts[chunk.doc_type] = counts.get(chunk.doc_type, 0) + 1
     return counts
+
+
+def _count_docs_by_type(chunks: Sequence[Chunk]) -> dict[str, int]:
+    """按文档数（而不是切片数）统计类型分布。
+
+    同一篇文档可以切出十几片，所以 `_count_by_type` 的数比"有多少篇"大得多。
+    前端要显示的是"20 篇城市知识 / 42 处资源点"，那只能用这个函数。
+    """
+    docs: dict[str, set[str]] = {}
+    for chunk in chunks:
+        docs.setdefault(chunk.doc_type, set()).add(chunk.doc_id)
+    return {doc_type: len(ids) for doc_type, ids in sorted(docs.items())}
 
 
 def _count_by_source_kind(chunks: Sequence[Chunk]) -> dict[str, int]:
