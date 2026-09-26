@@ -459,9 +459,13 @@ useReveal(root, packLoading)
                 >
                   {{ QA_ROUTE_LABEL[turn.meta.route] }}
                 </span>
-                <!-- 只在**真的检索了**的时候报条数：`general` 链路不检索，
-                     照旧显示会变成"检索 0 条 · 首条相关度 0%"，那是假数据 -->
-                <span v-if="turn.meta && turn.meta.retrieved > 0" class="cap muted">
+                <!-- 只在**真的检索了、而且来源卡片给得出来**的时候报条数。
+                     两个条件必须一致，否则会出现悬空声明：
+                     `general` 不检索（retrieved=0）→ 照旧显示会变成"检索 0 条"；
+                     离线时 `constrained` 检索了 5 条但一条来源都不给
+                     （那些切片没被用来回答）→ 显示"检索 5 条"却没有任何卡片可看，
+                     用户/评委问"哪 5 条"界面答不出。 -->
+                <span v-if="turn.meta && turn.meta.sources.length > 0" class="cap muted">
                   检索 {{ turn.meta.retrieved }} 条 · 首条相关度
                   {{ (turn.meta.top_score * 100).toFixed(0) }}%
                 </span>
