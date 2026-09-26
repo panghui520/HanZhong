@@ -76,6 +76,24 @@ export function countdown(seconds: number): string {
 }
 
 /**
+ * 转义 HTML 实体。**要往 `v-html` / `innerHTML` 里拼数据包文本时，先过它。**
+ *
+ * 抽出来是因为这件事现在有两个调用方，且第二个调用方（互动地图的 Marker，
+ * 见 `utils/mapPin.ts`）是**拼字符串**而不是模板 —— 那里没有任何框架兜底，
+ * 漏一次转义就是一个注入点。转义规则只能有一份。
+ *
+ * 五个字符都转（含引号）：调用方可能把值拼进属性，只转尖括号不够。
+ */
+export function escapeHtml(text: string): string {
+  return String(text ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+}
+
+/**
  * 模型回答的极简内联格式：先转义 HTML，再把 `**加粗**` 换成 `<strong>`。
  *
  * **不是 Markdown 渲染器** —— 只处理模型实际会用的这一种标记。刻意不引
@@ -91,9 +109,5 @@ export function countdown(seconds: number): string {
  * 于是同一句话在两页显示成两种样子 —— 用户会以为是两个不同的模型。
  */
 export function inlineText(text: string): string {
-  return String(text ?? '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+  return escapeHtml(text).replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
 }

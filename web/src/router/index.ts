@@ -16,6 +16,15 @@ const routes = [
       { path: '', name: 'home', component: () => import('@/views/portal/Home.vue') },
       { path: 'explore', name: 'explore', component: () => import('@/views/portal/Explore.vue') },
       {
+        // M4 互动地图。与「探索汉中」**是两个页面**，不是同一页的两种视图：
+        // 探索页是"按类别 → 主题 → 区县逐层收窄"的浏览（刻意不做"全部"档），
+        // 这一页是"按真实经纬度看全貌 + 点标注看卡片"。
+        // 两者读的是同一个 `/api/pois`，都没有自己的数据源。
+        path: 'map',
+        name: 'map',
+        component: () => import('@/views/portal/InteractiveMap.vue'),
+      },
+      {
         path: 'assistant',
         name: 'assistant',
         component: () => import('@/views/portal/Assistant.vue'),

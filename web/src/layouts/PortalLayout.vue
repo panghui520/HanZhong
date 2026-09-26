@@ -53,6 +53,10 @@ const overHero = computed(() => route.name === 'home' && !scrolled.value)
 const navs = [
   { label: '首页', to: '/' },
   { label: '探索汉中', to: '/explore' },
+  // M4 互动地图。紧挨着「探索汉中」放：两页看的是同一批景点，
+  // 只是"按分类浏览"与"按位置看全貌"两种视角，放在一起用户才会知道
+  // 它们是同一件事的两种看法，而不是两个不同的景点库。
+  { label: '互动地图', to: '/map' },
   { label: '行程规划', to: '/itinerary' },
   { label: '知识问答', to: '/assistant' },
   // M4 AI 旅游助手。与「知识问答」并排而不是替换它：

@@ -4,6 +4,18 @@ import vue from '@vitejs/plugin-vue'
 
 export default defineConfig({
   plugins: [vue()],
+  /**
+   * 环境变量目录指向**仓库根**，而不是默认的 `web/`。
+   *
+   * 仓库里只有一份 `.env`（在根目录），Python 侧读的就是它。前端要用到高德
+   * JS API 的 key 时，若沿用默认行为就得在 `web/` 下再放一份 ——
+   * 两份 .env 的结果是"改了根的那份、前端没变"，一个只能靠现象猜的静默不一致。
+   *
+   * 安全性：Vite **只把 `VITE_` 前缀的变量内联进产物**，所以根 .env 里的
+   * `LLM_API_KEY` / `MYSQL_PASSWORD` / `AMAP_KEY` 这些**不会**进前端包。
+   * 这条规则是这里敢指向上层目录的前提。
+   */
+  envDir: '..',
   resolve: {
     alias: {
       '@': fileURLToPath(new URL('./src', import.meta.url)),
