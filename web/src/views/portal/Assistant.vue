@@ -24,7 +24,7 @@ import {
  *
  * 这个页面刻意不叫"AI 助手"：项目红线之一是"核心不是聊天机器人"。
  * 它回答的是**汉中这座城市的公开事实**——地理、气候、历史、生态、物产，
- * 以及数据包里每个资源点、体验、产品的可核对信息，每条回答都带出处。
+ * 以及数据包里每个资源点、体验、产品的可核对信息，涉及汉中的回答都带出处。
  *
  * **架构上：模型负责说话，知识库负责依据。** 与汉中有关的问题先检索知识库，
  * 把命中的切片作为资料交给模型综合；与汉中无关的问题（"你是 AI 吗"）直接
@@ -365,15 +365,15 @@ useReveal(root, packLoading)
           <ul class="know__list">
             <li>
               <span class="know__k">原文可核对</span>
-              <span class="know__v">每条回答附来源，可点开对照原文</span>
+              <span class="know__v">涉及汉中的回答附来源，可点开对照原文</span>
             </li>
             <li>
               <span class="know__k">答不上就直说</span>
-              <span class="know__v">超出覆盖范围时明确说明，不编造</span>
+              <span class="know__v">知识库没有依据的本地事实，明确说明，不编造</span>
             </li>
             <li>
               <span class="know__k">离线可演示</span>
-              <span class="know__v">断网时按预生成答案回放，链路不中断</span>
+              <span class="know__v">断网时按预生成答案回放或摘录原文，链路不中断</span>
             </li>
           </ul>
         </div>
@@ -615,7 +615,7 @@ useReveal(root, packLoading)
             </ul>
             <p class="cap muted scope-list__note">
               城市知识来自汉中市人民政府《汉中概况》等公开资料，资源点信息来自数据包。
-              每条回答的来源都可点开核对。
+              涉及汉中的回答，来源都可点开核对；与汉中无关的问题不查知识库，也就不署名来源。
             </p>
           </div>
 
