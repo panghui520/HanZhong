@@ -21,6 +21,15 @@ const routes = [
         component: () => import('@/views/portal/Assistant.vue'),
       },
       {
+        // M4 AI 旅游助手。与 /assistant 是两个页面而不是一个页面的两个标签：
+        // 知识问答的契约是"检索 + 出处"（meta.route / sources），
+        // 助手的契约是"工具调度 + 卡片"（meta.tools / tool / cards）。
+        // 两套协议、两套后端端点（/ai/qa 与 /ai/agent），页面也就该分开。
+        path: 'agent',
+        name: 'agent',
+        component: () => import('@/views/portal/Agent.vue'),
+      },
+      {
         path: 'itinerary',
         name: 'itinerary',
         component: () => import('@/views/portal/Itinerary.vue'),

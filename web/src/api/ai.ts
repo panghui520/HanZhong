@@ -1,13 +1,18 @@
-import type { AiHealth, QaEvent, QaHandlers } from '@/types'
+import type {
+  AgentEvent,
+  AgentHandlers,
+  AiHealth,
+  QaEvent,
+  QaHandlers,
+} from '@/types'
 import { ApiError, request } from './http'
 
 /**
- * M3 文旅知识问答的接口层。
+ * AI 能力（M3 知识问答 + M4 旅游助手）的接口层。
  *
- * 与 citypack.ts 的区别：这里除了普通 JSON 请求，还有一个**流式**接口。
+ * 与 citypack.ts 的区别：这里除了普通 JSON 请求，还有**流式**接口。
  * 流式不能用 fetch + res.json()，必须自己读 ReadableStream 并按 SSE 分帧。
- * 分帧逻辑封在这里，页面只拿到 onMeta / onDelta / onDone / onError 回调，
- * 不需要知道 SSE 长什么样。
+ * 分帧逻辑封在这里，页面只拿到回调，不需要知道 SSE 长什么样。
  */
 
 /**
@@ -31,38 +36,110 @@ export function getSuggestions() {
 }
 
 /**
- * 发起一次流式问答。
+ * 发起一次 M3 流式问答。
  *
  * 返回一个 abort 函数，调用它可中断生成（用户切走页面或点"停止"时用）。
+ */
+export function ask(question: string, handlers: QaHandlers): () => void {
+  return openStream('/qa', question, handlers.onError, (frame) => {
+    const event = parseFrame<QaEvent>(frame)
+    if (!event) return
+    switch (event.type) {
+      case 'meta':
+        handlers.onMeta?.(event)
+        break
+      case 'delta':
+        handlers.onDelta?.(event.text)
+        break
+      case 'done':
+        handlers.onDone?.(event)
+        break
+      case 'error':
+        handlers.onError?.(event.message)
+        break
+    }
+  })
+}
+
+/**
+ * 发起一次 M4 旅游助手对话。
+ *
+ * 与 {@link ask} 共用同一套分帧与错误处理，差别只在路径与事件类型 ——
+ * 两套并行的流式解析代码迟早在"跨 chunk 被切断的帧"这类边界上分叉，
+ * 而那种 bug 表现为"偶尔丢一句话"，最难查。
+ *
+ * 事件顺序：meta → tool(running) → tool(done|error) → cards(可选)
+ *          → delta × N → done
+ */
+export function askAgent(question: string, handlers: AgentHandlers): () => void {
+  return openStream('/agent', question, handlers.onError, (frame) => {
+    const event = parseFrame<AgentEvent>(frame)
+    if (!event) return
+    switch (event.type) {
+      case 'meta':
+        handlers.onMeta?.(event)
+        break
+      case 'tool':
+        handlers.onTool?.(event)
+        break
+      case 'cards':
+        handlers.onCards?.(event)
+        break
+      case 'delta':
+        handlers.onDelta?.(event.text)
+        break
+      case 'done':
+        handlers.onDone?.(event)
+        break
+      case 'error':
+        handlers.onError?.(event.message)
+        break
+    }
+  })
+}
+
+/**
+ * 两个流式端点的共同实现：POST 一个问题，按 SSE 分帧后逐帧回调。
  *
  * 为什么不用 EventSource：EventSource 只支持 GET，问题得放在查询串里，
  * 中文要编码、长问题会撞 URL 长度上限，而且会被浏览器日志与代理记下来。
  * 用 fetch 发 POST、自己解 SSE，语义更对。
+ *
+ * @param path      端点后缀，如 `/qa` / `/agent`
+ * @param question  用户问题
+ * @param onError   传输层错误（连不上、非 200、流中断）的回调
+ * @param onFrame   每解析出一帧就回调一次，帧内容由调用方按各自协议分派
+ * @returns         中断函数
  */
-export function ask(question: string, handlers: QaHandlers): () => void {
+function openStream(
+  path: string,
+  question: string,
+  onError: ((message: string) => void) | undefined,
+  onFrame: (frame: string) => void,
+): () => void {
   const controller = new AbortController()
 
   void (async () => {
     let res: Response
     try {
-      res = await fetch(`${API_ROOT}${AI_PATH}/qa`, {
+      res = await fetch(`${API_ROOT}${AI_PATH}${path}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
         body: JSON.stringify({ question }),
         signal: controller.signal,
       })
-    } catch (e) {
+    } catch {
       if (controller.signal.aborted) return
-      handlers.onError?.('无法连接后端服务，请确认 server-java 已启动（默认 8080）')
+      onError?.('无法连接后端服务，请确认 server-java 已启动（默认 8080）')
       return
     }
 
     if (!res.ok) {
-      handlers.onError?.(`请求失败：HTTP ${res.status}`)
+      onError?.(`请求失败：HTTP ${res.status}`)
       return
     }
     if (!res.body) {
-      handlers.onError?.('浏览器不支持流式响应')
+      onError?.('浏览器不支持流式响应')
       return
     }
 
@@ -82,15 +159,15 @@ export function ask(question: string, handlers: QaHandlers): () => void {
         while (boundary !== -1) {
           const frame = buffer.slice(0, boundary)
           buffer = buffer.slice(boundary + 2)
-          dispatch(frame, handlers)
+          onFrame(frame)
           boundary = buffer.indexOf('\n\n')
         }
       }
       // 收尾：服务端若没有以空行结束，最后残留的一帧也要处理
-      if (buffer.trim()) dispatch(buffer, handlers)
-    } catch (e) {
+      if (buffer.trim()) onFrame(buffer)
+    } catch {
       if (!controller.signal.aborted) {
-        handlers.onError?.('连接中断，回答可能不完整')
+        onError?.('连接中断，回答可能不完整')
       }
     } finally {
       reader.releaseLock()
@@ -100,37 +177,25 @@ export function ask(question: string, handlers: QaHandlers): () => void {
   return () => controller.abort()
 }
 
-/** 解析一帧 SSE，取出 data: 行并派发 */
-function dispatch(frame: string, handlers: QaHandlers) {
+/**
+ * 解析一帧 SSE，取出 data: 行并反序列化。
+ *
+ * 单帧坏掉返回 null 而不是抛错：一轮回答里丢一句不该让整段失败，
+ * 后面的帧还是好的。
+ */
+function parseFrame<T>(frame: string): T | null {
   const payload = frame
     .split('\n')
     .filter((line) => line.startsWith('data:'))
     .map((line) => line.slice(5).trimStart())
     .join('')
 
-  if (!payload) return
+  if (!payload) return null
 
-  let event: QaEvent
   try {
-    event = JSON.parse(payload) as QaEvent
+    return JSON.parse(payload) as T
   } catch {
-    // 单帧坏掉不该让整轮回答失败，丢掉它继续读后面的
-    return
-  }
-
-  switch (event.type) {
-    case 'meta':
-      handlers.onMeta?.(event)
-      break
-    case 'delta':
-      handlers.onDelta?.(event.text)
-      break
-    case 'done':
-      handlers.onDone?.(event)
-      break
-    case 'error':
-      handlers.onError?.(event.message)
-      break
+    return null
   }
 }
 

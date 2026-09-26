@@ -129,10 +129,29 @@ public class AiClient {
      * @param onLine    每读到一行 SSE 就回调一次（不含换行符）
      */
     public void streamQa(String question, Consumer<String> onLine) {
+        streamQuestion("/ai/qa", question, onLine);
+    }
+
+    /**
+     * 发起一次 Agent 对话（M4），把 SSE 行逐行交给消费者。
+     *
+     * <p>与 {@link #streamQa} 走**同一条隧道**：同一个内部令牌、同一套超时、
+     * 同样逐行转发。唯一的差别是路径与事件协议（多了 tool / cards）。
+     * 所以这里不复用一套新的 HTTP 逻辑，而是共用 {@code streamQuestion}——
+     * 两套并行的转发代码迟早在超时或错误处理上分叉。
+     *
+     * <p>为什么不把 Agent 塞进 {@code /ai/qa}：见 {@code AiController} 的类注释。
+     */
+    public void streamAgent(String question, Consumer<String> onLine) {
+        streamQuestion("/ai/agent", question, onLine);
+    }
+
+    /** 两个流式端点的共同实现：POST 一个问题，逐行回吐 SSE */
+    private void streamQuestion(String path, String question, Consumer<String> onLine) {
         HanYouProperties.Ai ai = properties.getAi();
         String payload = "{\"question\":\"" + escapeJson(question) + "\"}";
 
-        HttpRequest request = baseRequest("/ai/qa")
+        HttpRequest request = baseRequest(path)
                 .header("Content-Type", "application/json; charset=utf-8")
                 .timeout(Duration.ofSeconds(ai.getReadTimeoutSeconds()))
                 .POST(HttpRequest.BodyPublishers.ofString(payload, StandardCharsets.UTF_8))
@@ -152,10 +171,10 @@ public class AiClient {
                 }
             }
         } catch (ConnectException e) {
-            log.warn("[AI] 连接失败：{}", e.getMessage());
+            log.warn("[AI] {} 连接失败：{}", path, e.getMessage());
             onLine.accept(errorEvent("AI 服务未启动或端口不通，请先运行 server-ai（" + ai.getBaseUrl() + "）"));
         } catch (IOException e) {
-            log.warn("[AI] 读取流失败：{}", e.getMessage());
+            log.warn("[AI] {} 读取流失败：{}", path, e.getMessage());
             onLine.accept(errorEvent("与 AI 服务的连接中断：" + e.getMessage()));
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();

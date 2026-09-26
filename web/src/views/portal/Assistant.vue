@@ -6,6 +6,7 @@ import SceneArt from '@/components/SceneArt.vue'
 import { useAsync } from '@/composables/useAsync'
 import { useReveal } from '@/composables/useReveal'
 import {
+  QA_DOC_TYPE_LABEL,
   QA_MODE_LABEL,
   QA_ROUTE_HINT,
   QA_ROUTE_LABEL,
@@ -211,12 +212,7 @@ function renderText(text: string) {
     .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
 }
 
-const SOURCE_KIND: Record<string, string> = {
-  city_doc: '城市知识',
-  poi: '资源点',
-  experience: '乡村体验',
-  product: '乡村产品',
-}
+const SOURCE_KIND = QA_DOC_TYPE_LABEL
 
 function kindOf(source: QaSource) {
   return SOURCE_KIND[source.doc_type] ?? source.doc_type

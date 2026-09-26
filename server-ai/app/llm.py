@@ -106,6 +106,68 @@ SYSTEM_PROMPT_GENERAL = """你是「汉游智脑」的助手 —— 一个面向
    如果用户其实想问的是{city}的情况，提醒他补上"{city}"再问一次。
 3. 用简体中文，简洁明了，不要写引用标记。"""
 
+# ----------------------------------------------------------------------
+# M4 工具调用：两份新提示词
+#
+# 与 M3 的三份是**同一套思路的延伸**：模型被允许使用哪一部分知识。
+# 这里多出来的是"这一部分知识由外部工具现场取回"。
+# ----------------------------------------------------------------------
+
+SYSTEM_PROMPT_TOOLS = """你是「汉游智脑」的 AI 旅游助手，服务对象是准备到陕西{city}旅游的游客。
+本次回答附有**工具返回的真实数据**（地点信息来自高德地图），这些数据是可靠的。
+
+回答规则：
+1. **只依据【工具结果】里出现过的地点、距离、地址、电话来推荐。**
+   工具结果里没有的酒店、餐厅、距离、价格，一律不要补充或推测 ——
+   你没有地图数据，写出来就是在骗人，而用户会照着它去订房。
+2. 可以做的：按距离远近排序、把同类地点分组、指出哪个更靠近某个地标、
+   提醒用户哪些字段（电话、营业时间）需要自行核实。
+3. 不可以做的：编造评分、编造「步行 8 分钟」、编造「离车站只有 500 米」、
+   编造营业时间或房型价格。距离**只引用工具给出的米数**。
+4. 工具结果为空时，直接说明这个位置附近没有查到该类地点，不要拿别的数据凑数。
+5. 用简体中文，简洁分点，用自己的话组织，不要整段照抄工具结果。
+6. 不要写「根据工具结果1」这类引用标记，卡片由系统单独展示。
+7. 本系统只做**推荐**，不做预订。不要承诺能帮用户订房、订座或付款，
+   **也不要描述界面上有「预订」按钮或跳转链接** —— 这一版没有这些按钮，
+   说了用户会去找一个不存在的东西。要订房时，说明需要他自己到第三方平台预订。
+8. 如果工具结果的说明里指出**搜索中心被替换过**（例如"没能定位到 X，已改用
+   市区中心"），必须在回答开头如实说明这一点，再给结果。用户问的是 X 附近，
+   答的是别处附近，不说明就等于答错了问题。"""
+
+ROUTER_PROMPT = """你是「汉游智脑」的**工具调度器**。你的唯一任务是判断用户这一句话
+需要调用哪个工具，**不要回答用户的问题**。
+
+可用工具：
+{tool_menu}
+
+判断规则（按顺序看）：
+1. 问「某地附近 / 周围有什么酒店、餐厅、景点」这类**以某个地点为中心**的搜索
+   → `search_nearby`
+2. 问**某个具体地点本身**的位置或信息（「汉中博物馆在哪」「汉中高铁站在哪」）
+   → `search_poi`
+3. 问{city}的历史、文化、气候、物产、特产知识，或问数据包里某处资源点、
+   某项体验、某款产品的介绍 → `knowledge_search`
+4. 与{city}无关（问助手自身、通用概念、闲聊），或只是打招呼 → `none`
+
+只输出**一行 JSON**，不要解释、不要 Markdown 代码块、不要多余文字：
+
+{"tool": "工具名", "args": {...}}
+
+各工具的 args 写法：
+- `search_nearby`：{"center": "中心点的地点名", "keyword": "关键词，如 酒店 / 餐厅", "types": "类型编码", "radius": 半径米数}
+- `search_poi`：{"keywords": "要查的地点名", "types": "类型编码，可省略"}
+- `knowledge_search`：{"query": "用户问题的核心问法"}
+- `none`：{}
+
+三条硬性约束：
+- **一次只选一个工具。**
+- **不要编造地点名**。用户没提到的地点不要自己补；用户说「附近」但没说在哪附近时，
+  把 `center` 写成空字符串，系统会用城市中心兜底。
+- `types` 只能用上面工具清单里给出的编码，不要自己发明。
+
+（注意：上面 JSON 示例里的花括号是**字面量**，不是占位符。本提示词由 `_fill()`
+逐键替换，不走 `str.format`，所以不需要写双花括号。）"""
+
 
 def _fill(template: str, **values: str) -> str:
     """占位符替换。
@@ -162,6 +224,40 @@ def build_messages(
     return [
         {"role": "system", "content": system},
         {"role": "user", "content": f"【资料】\n{context}\n\n【问题】\n{question}"},
+    ]
+
+
+def build_router_messages(
+    question: str, tool_menu: str, *, city: str = "汉中"
+) -> list[dict[str, str]]:
+    """工具调度器的消息。它**不回答**问题，只输出一行 JSON 决定用哪个工具。"""
+    return [
+        {"role": "system", "content": _fill(ROUTER_PROMPT, city=city, tool_menu=tool_menu)},
+        {"role": "user", "content": question},
+    ]
+
+
+def build_tool_messages(
+    question: str,
+    tool_text: str,
+    *,
+    city: str = "汉中",
+    note: str = "",
+) -> list[dict[str, str]]:
+    """把工具结果作为【工具结果】交给模型，由它组织成人话。
+
+    与 `build_messages` 的结构刻意保持一致（system + 一条含【】区块的 user），
+    这样"资料"与"工具结果"对模型是同一类东西：**它只能引用，不能补充**。
+
+    `note` 用于追加一句本次的边界说明（例如"高德未配置""只取到 3 条"）。
+    放在 system 而不是 user，是因为它约束的是模型的行为而不是内容。
+    """
+    system = _fill(SYSTEM_PROMPT_TOOLS, city=city)
+    if note:
+        system = f"{system}\n\n补充说明：{note}"
+    return [
+        {"role": "system", "content": system},
+        {"role": "user", "content": f"【工具结果】\n{tool_text}\n\n【问题】\n{question}"},
     ]
 
 
@@ -258,6 +354,47 @@ async def stream_llm(settings, messages: list[dict[str, str]]) -> AsyncIterator[
                 piece = delta.get("content")
                 if piece:
                     yield piece
+
+
+async def complete_llm(
+    settings, messages: list[dict[str, str]], *, max_tokens: int = 400
+) -> str:
+    """非流式补全，返回完整文本。
+
+    给「工具调度器」这类**只要一小段结构化输出**的调用用。为什么不复用
+    `stream_llm`：路由决策要的是一次完整、可直接 `json.loads` 的输出，
+    流式只会让我们自己把碎片再拼回来，多一层出错机会。而决定本身只有几十个
+    token，非流式与流式的延迟差异可以忽略。
+
+    `temperature=0`：决策要**稳定**，同一句话问两遍不该选到不同工具。
+    生成回答那边是 0.3（要的是措辞自然），两者目的不同，不要统一。
+    """
+    payload = {
+        "model": settings.llm_model,
+        "messages": messages,
+        "stream": False,
+        "temperature": 0,
+        "max_tokens": max_tokens,
+    }
+    headers = {
+        "Authorization": f"Bearer {settings.llm_api_key}",
+        "Content-Type": "application/json",
+    }
+
+    timeout = httpx.Timeout(settings.llm_timeout_s, connect=5.0)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        response = await client.post(
+            f"{settings.llm_base_url}/chat/completions", json=payload, headers=headers
+        )
+        response.raise_for_status()
+        data = response.json()
+
+    try:
+        content = data["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError) as exc:
+        # 把原始返回截一段带出来：模型服务换了实现时，这一行是唯一的线索
+        raise RuntimeError(f"模型返回结构异常：{str(data)[:200]}") from exc
+    return content or ""
 
 
 def extractive_answer(question: str, hits: Sequence[Hit]) -> str:

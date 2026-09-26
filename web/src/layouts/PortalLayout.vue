@@ -55,6 +55,10 @@ const navs = [
   { label: '探索汉中', to: '/explore' },
   { label: '行程规划', to: '/itinerary' },
   { label: '知识问答', to: '/assistant' },
+  // M4 AI 旅游助手。与「知识问答」并排而不是替换它：
+  // 两者回答的是不同的问题（城市公开知识 vs 我现在该去哪儿），
+  // 用的数据源也不同（本地知识库 vs 高德地图），合并会两边都说不清。
+  { label: 'AI 助手', to: '/agent' },
   { label: '乡村好物', to: '/goods' },
 ]
 

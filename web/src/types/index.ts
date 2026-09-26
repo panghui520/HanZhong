@@ -205,6 +205,20 @@ export const QA_SOURCE_KIND_LABEL: Record<QaSourceKind, string> = {
 }
 
 /**
+ * 文档类型（`doc_type`）→ 中文名。
+ *
+ * 放在这里而不是页面里：M3 的知识问答页与 M4 的助手页**都要显示来源**，
+ * 各自抄一份的结果是新增一类文档时只改了一处，另一处直接显示英文标识
+ * （`?? source.doc_type` 的兜底让这件事静默发生，不报错）。
+ */
+export const QA_DOC_TYPE_LABEL: Record<string, string> = {
+  city_doc: '城市知识',
+  poi: '资源点',
+  experience: '乡村体验',
+  product: '乡村产品',
+}
+
+/**
  * 回答引用的来源。
  *
  * **全部字段都来自知识库元数据，没有任何一处由模型生成** ——
@@ -295,6 +309,18 @@ export interface AiHealth {
   stale: boolean
   stale_hint?: string
   error?: string
+  /**
+   * M4：高德密钥是否已配置。**AI 服务未启动时这两个字段整个缺省** ——
+   * 所以页面判断"能不能用地图"要写成 `health?.agent?.amap_configured === true`，
+   * 而不是 `!health.amap_configured`（后者在 health 为 null 时会炸）。
+   */
+  amap?: { configured: boolean }
+  /** M4：旅游助手的可用工具与示例问题（示例按当前能力生成，见 agent.py） */
+  agent?: {
+    amap_configured: boolean
+    tools: string[]
+    samples: { title: string; items: string[] }[]
+  }
 }
 
 /** 一轮问答。页面里按时间顺序保存，用于多轮上下文展示 */
@@ -587,5 +613,197 @@ export interface Order {
   items: OrderItem[]
   /** 已评价时带上；未评价则整个字段缺省（后端 non_null 序列化） */
   review?: OrderReview
+}
+
+/* ============================================================
+ * M4 AI 旅游助手（Agent）
+ *
+ * 与 M3 问答（QaEvent）是**两套独立的事件协议**，刻意不复用：
+ * M3 的 meta 描述"检索行为"（route / sources / gaps），
+ * M4 的 meta 描述"用了哪个工具"（tools / amap），done 里还多一个 tool。
+ * 合并成一套的话，前端每处都要判断"这次有没有 tool 字段"，
+ * 而 M3 已验收的契约也会被改动。
+ *
+ * 服务端实现见 server-ai/app/agent.py，事件顺序：
+ *   meta → tool(running) → tool(done|error) → cards(可选) → delta × N → done
+ * 任一步出错则发 error 并结束。
+ * ============================================================ */
+
+/** 已知工具名。`none` 表示"不需要工具，直接由模型回答" */
+export type AgentToolName = 'knowledge_search' | 'search_nearby' | 'search_poi' | 'none'
+
+export const AGENT_TOOL_LABEL: Record<string, string> = {
+  knowledge_search: '本地知识库',
+  search_nearby: '高德 · 附近搜索',
+  search_poi: '高德 · 关键词搜索',
+  none: '直接回答',
+}
+
+export interface AgentMetaEvent {
+  type: 'meta'
+  mode: QaMode
+  /** 与 M3 同义：这一答实际由谁产出（模型名 / extractive） */
+  generator: string
+  city: string
+  /** 高德密钥是否已配置。false 时 search_nearby / search_poi 不可用 */
+  amap: boolean
+  /** 本次真正可用的工具名。与 meta.amap 一致，不单独维护一份 */
+  tools: string[]
+}
+
+/**
+ * 工具调用状态。
+ *
+ * 单独成一条事件而不是塞进 meta：工具是**异步且可能失败**的
+ * （高德超时、地理编码没命中），前端要在"正在查"和"查完了"之间切换显示，
+ * 而 meta 只在开头发一次。
+ */
+export interface AgentToolEvent {
+  type: 'tool'
+  name: string
+  status: 'running' | 'done' | 'error'
+  /** 服务端生成的中文说明，例："正在搜索「汉中高铁站」附近…" */
+  label: string
+  /** 查到的条数（running 时没有） */
+  count?: number
+  elapsed_ms?: number
+  error?: string
+}
+
+/**
+ * 一张推荐卡片。字段**逐字来自高德**，不经过模型转述。
+ *
+ * 为什么不由模型把结构化数据说出来再解析回来：用户要照着 `tel` 打电话、
+ * 照着 `address` 导航，中间任何一步转述出错都是"酒店名少个字"这种
+ * 现场很难解释的问题。所以模型只管组织语言，卡片走独立通道。
+ *
+ * `source` 恒为 `amap`，留这个字段是为了以后接自采数据时能分清来源。
+ */
+export interface AgentCard {
+  poi_id: string
+  name: string
+  address: string
+  /** 区县，例"洋县" */
+  district: string
+  business_area: string
+  typecode: string
+  /** 中文类别，例"宾馆酒店"。由 typecode 前两位映射，不是高德原文 */
+  category: string
+  lng: number | null
+  lat: number | null
+  distance_m: number | null
+  tel: string
+  /** 高德返回的是字符串，可能是 "" —— 不要当成 number 用 */
+  rating: string
+  cost: string
+  tag: string
+  photo: string
+  source: string
+}
+
+/**
+ * 一张**来源**卡片（走知识库那条路时下发）。
+ *
+ * 与 {@link AgentCard} 是两种东西，所以 `cards` 事件是联合类型而不是
+ * 一个大而全的结构：来源是"这条依据从哪来"（可核对），
+ * 推荐卡是"这个地点在哪"（可导航）。字段几乎不重叠，
+ * 硬合成一个类型的结果是两边都要写一堆可选字段。
+ *
+ * 字段与 M3 的 `QaSource` 一致（后端两处共用 `_source_payload`），
+ * 但**刻意不复用 QaSource 类型**：M3 的 `/ai/qa` 与 M4 的 `/ai/agent`
+ * 是两套协议，共用类型会让"改一处影响两处"，而这两个端点本可以各自演进。
+ */
+export interface AgentSourceCard {
+  title: string
+  doc_type: string
+  source_name: string
+  source_url: string
+  source_kind: QaSourceKind
+  snippet: string
+  /** 站内链接用。数据包自有那几档靠它跳到 /poi/{poi_id} */
+  poi_id: string
+  score: number | null
+}
+
+/**
+ * 卡片类别。**这是一个封闭集合**，由后端定义：
+ *   - `knowledge` —— 知识库来源（`AgentSourceCard`）
+ *   - 其余五种 —— 高德 POI（`AgentCard`），由 POI 类型码前两位映射
+ * 见 server-ai/app/tools.py 的 `_KIND_BY_MAJOR` 与 `_knowledge_search`。
+ */
+export type AgentCardKind =
+  | 'knowledge'
+  | 'hotel'
+  | 'restaurant'
+  | 'attraction'
+  | 'transport'
+  | 'poi'
+
+/**
+ * 卡片按类分组下发。`kind` 是判别式：`knowledge` 时 `items` 是来源卡片，
+ * 其余情况是高德 POI 卡片。前端必须按它分支渲染 ——
+ * 两种卡片字段几乎不重叠，混着渲染的结果是整片空白。
+ */
+export type AgentCardsEvent =
+  | { type: 'cards'; kind: 'knowledge'; items: AgentSourceCard[] }
+  | {
+      type: 'cards'
+      kind: 'hotel' | 'restaurant' | 'attraction' | 'transport' | 'poi'
+      items: AgentCard[]
+    }
+
+export interface AgentDeltaEvent {
+  type: 'delta'
+  text: string
+}
+
+export interface AgentDoneEvent {
+  type: 'done'
+  mode: QaMode
+  /** 本次实际用的工具，便于前端显示"由高德附近搜索回答" */
+  tool: string
+  elapsed_ms: number
+}
+
+export interface AgentErrorEvent {
+  type: 'error'
+  message: string
+}
+
+export type AgentEvent =
+  | AgentMetaEvent
+  | AgentToolEvent
+  | AgentCardsEvent
+  | AgentDeltaEvent
+  | AgentDoneEvent
+  | AgentErrorEvent
+
+/** 流式回调。比 M3 多 onTool / onCards 两个钩子 */
+export interface AgentHandlers {
+  onMeta?: (event: AgentMetaEvent) => void
+  onTool?: (event: AgentToolEvent) => void
+  onCards?: (event: AgentCardsEvent) => void
+  onDelta?: (text: string) => void
+  onDone?: (event: AgentDoneEvent) => void
+  onError?: (message: string) => void
+}
+
+/** 一轮助手对话。与 QaTurn 分开：它多带工具状态与卡片 */
+export interface AgentTurn {
+  id: number
+  question: string
+  answer: string
+  meta: AgentMetaEvent | null
+  /** 最近一次工具事件。running → done 就地更新，不追加新行 */
+  tool: AgentToolEvent | null
+  /** 高德 POI 卡片。走知识库那条路时为空 */
+  cards: AgentCard[]
+  /** 知识库来源卡片。走高德那条路时为空 */
+  sources: AgentSourceCard[]
+  /** 卡片类别，模板据此决定渲染哪种卡片 */
+  cardKind: string
+  elapsedMs: number
+  streaming: boolean
+  error: string
 }
 

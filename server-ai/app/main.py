@@ -19,6 +19,8 @@ from typing import Any, AsyncIterator
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
+from .agent import AgentService
+from .amap import create_client
 from .config import Settings, get_settings
 from .corpus import build_chunks
 from .embed import create_embedder
@@ -86,8 +88,21 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         logger.warning("[AI] 知识库不可用：%s", exc)
 
     state["cache"] = AnswerCache(settings.cache_file)
+    # 高德客户端不依赖知识库，所以**无条件创建**：知识库没建好时它仍然可用，
+    # /ai/health 里也能如实报告"key 配没配"，而不是整块信息缺失。
+    state["amap"] = create_client(settings)
     state["service"] = (
         QaService(settings, state["store"], state["cache"]) if "store" in state else None
+    )
+    # Agent 要同时用到知识库与高德，所以只在知识库可用时创建
+    state["agent"] = (
+        AgentService(settings, state["store"], state["amap"]) if "store" in state else None
+    )
+
+    logger.info(
+        "[AI] 工具就绪：高德=%s 模型=%s",
+        "已配置 AMAP_KEY" if state["amap"].enabled else "未配置 AMAP_KEY",
+        settings.llm_model if settings.llm_enabled else "未配置（离线模式）",
     )
 
     app.state.ctx = state
@@ -116,6 +131,14 @@ def _service(request: Request) -> QaService:
     return service
 
 
+def _agent_service(request: Request) -> AgentService:
+    service = request.app.state.ctx.get("agent")
+    if service is None:
+        detail = request.app.state.ctx.get("load_error", "知识库不可用")
+        raise HTTPException(status_code=503, detail=detail)
+    return service
+
+
 @app.get("/ai/health")
 async def health(request: Request, _: None = Depends(require_token)) -> dict[str, Any]:
     ctx = request.app.state.ctx
@@ -127,6 +150,15 @@ async def health(request: Request, _: None = Depends(require_token)) -> dict[str
     payload["stale"] = ctx.get("stale", False)
     if payload["stale"]:
         payload["stale_hint"] = f"语料已变化，建议重建知识库：{BUILD_HINT}"
+
+    # M4 工具能力。**如实报告**：key 没配就说没配，不要装作工具可用 ——
+    # 前端据此决定要不要把"找酒店"这类入口露出来。
+    amap = ctx.get("amap")
+    payload["amap"] = {"configured": bool(amap and amap.enabled)}
+    agent = ctx.get("agent")
+    if agent is not None:
+        payload["agent"] = agent.status()
+
     return payload
 
 
@@ -139,14 +171,19 @@ async def suggestions(request: Request, _: None = Depends(require_token)) -> lis
     return service.suggestions()
 
 
-@app.post("/ai/qa")
-async def qa(request: Request, _: None = Depends(require_token)) -> StreamingResponse:
-    body = await request.json()
-    question = str(body.get("question", ""))
-    service = _service(request)
+def _sse(events) -> StreamingResponse:
+    """把一个事件流包成 SSE 响应。
+
+    两个接口（`/ai/qa` 与 `/ai/agent`）共用这一处，是为了保证**帧格式完全一致**：
+    前端只实现了一套 `\\n\\n` 分帧逻辑，两边格式一旦不同，就会表现为
+    "某个页面偶尔丢帧"，那种 bug 极难定位。
+    """
 
     async def event_stream() -> AsyncIterator[str]:
-        async for event in service.stream(question):
+        async for event in events:
+            # ensure_ascii=False：中文原样输出，抓包与日志里可读。
+            # json.dumps 会把字符串里的换行转义成 \n 两个字符，
+            # 所以不会出现"内容里的换行被前端当成帧边界"这种事故。
             yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
 
     return StreamingResponse(
@@ -159,3 +196,40 @@ async def qa(request: Request, _: None = Depends(require_token)) -> StreamingRes
             "X-Accel-Buffering": "no",
         },
     )
+
+
+@app.post("/ai/qa")
+async def qa(request: Request, _: None = Depends(require_token)) -> StreamingResponse:
+    body = await request.json()
+    question = str(body.get("question", ""))
+    return _sse(_service(request).stream(question))
+
+
+@app.post("/ai/agent")
+async def agent(request: Request, _: None = Depends(require_token)) -> StreamingResponse:
+    """M4 工具调用问答。
+
+    与 `/ai/qa` 是**两条独立的链路**，刻意不合并：
+    `/ai/qa` 是 M3 已验收的知识库问答（无状态、不调外部数据源、有预生成缓存），
+    而这里是"模型自己决定调哪个工具"的 Agent。合并会让 M3 的
+    `route`/`mode`/`sources` 契约多出一批只属于 Agent 的事件类型，
+    已经写好的 eval 与前端分支都得跟着改 —— 而它们本来不需要知道工具的存在。
+
+    事件协议（每个 `data:` 是一行 JSON）：
+
+        {"type":"meta",  "mode":"llm", "generator":"deepseek-chat",
+                         "city":"汉中", "amap":true, "tools":[...]}
+        {"type":"tool",  "name":"search_nearby", "status":"running", "label":"..."}
+        {"type":"tool",  "name":"search_nearby", "status":"done", "count":12,
+                         "elapsed_ms":340, "error":""}
+        {"type":"cards", "kind":"hotel", "items":[...]}
+        {"type":"delta", "text":"..."}
+        {"type":"done",  "mode":"llm", "tool":"search_nearby", "elapsed_ms":3200}
+        {"type":"error", "message":"..."}
+
+    `cards` 里的字段**全部来自高德返回**，模型不参与生成 ——
+    这是"不让模型编造真实旅游数据"这条红线的实现方式。
+    """
+    body = await request.json()
+    question = str(body.get("question", ""))
+    return _sse(_agent_service(request).stream(question))
