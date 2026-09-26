@@ -141,8 +141,13 @@ export const BUSINESS_ORDER: BusinessType[] = [
 
 /**
  * 回答模式。四种模式是**降级链**，不是可选项：
- * llm（配了模型）→ cache（命中预生成答案）→ extractive（摘录原文）→ no_answer（超出知识库范围）。
+ * llm（配了模型）→ cache（命中预生成答案）→ extractive（摘录原文）→ no_answer（这一问没答上）。
  * 页面要如实显示当前是哪一档，用户才知道这个回答可信到什么程度。
+ *
+ * `no_answer` 的**口径**（2026-09-26 起收窄）：它现在只表示
+ * "离线演示模式下、这一问本来需要模型"——配了模型时不会出现。
+ * 以前它还兼着"知识库没写过这个话题"的意思，那条判定已经挪去 `route`，
+ * 因为"知识库没写过"不等于"系统答不了"（"你是 AI 吗"就属于这种）。
  */
 export type QaMode = 'llm' | 'cache' | 'extractive' | 'no_answer'
 
@@ -150,7 +155,36 @@ export const QA_MODE_LABEL: Record<QaMode, string> = {
   llm: '大模型生成',
   cache: '预生成答案',
   extractive: '原文摘录',
-  no_answer: '知识库未覆盖',
+  no_answer: '离线模式未答',
+}
+
+/**
+ * 回答链路：这一问**用没用知识库**。与 `mode` 正交 ——
+ * `mode` 说"这条回答由谁产出"，`route` 说"模型被允许用哪一部分知识"。
+ *
+ *   rag         —— 知识库覆盖这个问题。检索 → 把命中的切片作为【资料】交给模型
+ *   constrained —— 涉及本地事实、但知识库**可能**没写过（`gaps` 非空）。
+ *                  照常检索、照常给【资料】，只是提示词更严：
+ *                  资料答不了的部分要明说"缺少可靠依据"，不许编造本地事实
+ *   general     —— 与汉中无关（问系统自身 / 通用概念 / 寒暄）。
+ *                  **不检索**，直接把问题交给模型
+ *
+ * 页面据此显示"知识库增强 / 通用问答"：`constrained` 与 `rag` 都用知识库，
+ * 区别只在提示词的严格程度（属于实现细节，不占用徽标），所以两者共用同一个
+ * 用户可见标签，细节放在 `QA_ROUTE_HINT` 里作为悬停说明。
+ */
+export type QaRoute = 'rag' | 'constrained' | 'general'
+
+export const QA_ROUTE_LABEL: Record<QaRoute, string> = {
+  rag: '知识库增强',
+  constrained: '知识库增强',
+  general: '通用问答',
+}
+
+export const QA_ROUTE_HINT: Record<QaRoute, string> = {
+  rag: '检索了知识库，并把命中的资料交给模型综合作答',
+  constrained: '涉及本地事实，但知识库可能没有依据：仍给了资料，提示词要求模型不得编造',
+  general: '与汉中无关的问题，未检索知识库，由模型直接回答',
 }
 
 /**
@@ -195,12 +229,24 @@ export interface QaSource {
 export interface QaMetaEvent {
   type: 'meta'
   mode: QaMode
+  /** 这一问用没用知识库（rag / constrained 用了，general 没用） */
+  route: QaRoute
+  /**
+   * 这条回答**实际由谁产出**：模型名（真调了 DeepSeek）/ `cache` /
+   * `extractive` / `none`。给"到底有没有调模型"一个可直接断言的字段，
+   * 不用从回答文本里猜 —— 措辞和长度都会骗人。
+   */
+  generator: string
   sources: QaSource[]
-  /** 检索到的候选条数 */
+  /** 检索到的候选条数。`general` 链路不检索，恒为 0 */
   retrieved: number
   /** 首条候选的归一化 BM25 相关度 */
   top_score: number
-  /** 问题里知识库完全没写过的实词。非空即判定超范围 */
+  /**
+   * 问题里知识库完全没写过的实词。
+   * **注意它现在只是信号，不是闸门**：非空表示"这一问涉及本地事实但知识库可能没依据"，
+   * 会走 `constrained` 链路并把事实约束写进提示词；**不再**因此拒答。
+   */
   gaps: string[]
   gaps_hint: string
 }

@@ -7,11 +7,14 @@ import { useAsync } from '@/composables/useAsync'
 import { useReveal } from '@/composables/useReveal'
 import {
   QA_MODE_LABEL,
+  QA_ROUTE_HINT,
+  QA_ROUTE_LABEL,
   QA_SOURCE_KIND_LABEL,
   type AiHealth,
   type Experience,
   type Product,
   type QaMode,
+  type QaRoute,
   type QaSource,
   type QaTurn,
 } from '@/types'
@@ -22,7 +25,11 @@ import {
  * 这个页面刻意不叫"AI 助手"：项目红线之一是"核心不是聊天机器人"。
  * 它回答的是**汉中这座城市的公开事实**——地理、气候、历史、生态、物产，
  * 以及数据包里每个资源点、体验、产品的可核对信息，每条回答都带出处。
- * 答不上来时明确说"知识库没有记载"，而不是让模型即兴发挥。
+ *
+ * **架构上：模型负责说话，知识库负责依据。** 与汉中有关的问题先检索知识库，
+ * 把命中的切片作为资料交给模型综合；与汉中无关的问题（"你是 AI 吗"）直接
+ * 交给模型，不检索也不署名来源。答不上来时明说"知识库缺少依据"，
+ * 而不是让模型即兴发挥本地事实。
  *
  * 页面结构上刻意做成"欢迎区 → 对话区"两段：
  * 空态时是一个有引导的欢迎区（能做的事、覆盖什么、推荐问题、可推的内容），
@@ -234,6 +241,12 @@ function modeClass(mode: QaMode | undefined) {
   return 'tag tag-brand'
 }
 
+/** 链路徽标：金色 = 这一条回答有知识库依据（本项目想让人看见的就是这个），
+ *  中性灰 = 通用问答，没用知识库。 */
+function routeClass(route: QaRoute | undefined) {
+  return route === 'general' ? 'tag' : 'tag tag-gold'
+}
+
 // ------------------------------------------------------------------ 生命周期
 
 onMounted(async () => {
@@ -274,8 +287,9 @@ useReveal(root, packLoading)
 
         <h1 class="display hero__title">先查过资料，<br />再开口回答</h1>
         <p class="hero__desc">
-          问题先在城市知识库中检索，回答只依据检索到的公开资料组织，并附上出处。
-          知识库没有写过的内容，系统会直接说明，不会替它补一个听起来合理的答案。
+          涉及汉中的问题先在城市知识库中检索，回答依据检索到的公开资料组织，并附上出处；
+          与汉中无关的问题直接回答。知识库没有写过的本地事实，系统会直接说明，
+          不会替它补一个听起来合理的答案。
         </p>
 
         <!-- 覆盖范围：把"这个知识库里有什么"讲清楚，而不是只给一个聊天框 -->
@@ -305,7 +319,7 @@ useReveal(root, packLoading)
             提问
           </button>
         </div>
-        <p class="hero__hint">Enter 发送 · Shift+Enter 换行 · 回答只依据知识库，超出范围会直说</p>
+        <p class="hero__hint">Enter 发送 · Shift+Enter 换行 · 汉中问题先查知识库，本地事实查不到会直说</p>
       </div>
     </header>
 
@@ -438,7 +452,16 @@ useReveal(root, packLoading)
                 <span v-if="turn.meta" :class="modeClass(turn.meta.mode)">
                   {{ QA_MODE_LABEL[turn.meta.mode] }}
                 </span>
-                <span v-if="turn.meta && turn.meta.mode !== 'no_answer'" class="cap muted">
+                <span
+                  v-if="turn.meta"
+                  :class="routeClass(turn.meta.route)"
+                  :title="QA_ROUTE_HINT[turn.meta.route]"
+                >
+                  {{ QA_ROUTE_LABEL[turn.meta.route] }}
+                </span>
+                <!-- 只在**真的检索了**的时候报条数：`general` 链路不检索，
+                     照旧显示会变成"检索 0 条 · 首条相关度 0%"，那是假数据 -->
+                <span v-if="turn.meta && turn.meta.retrieved > 0" class="cap muted">
                   检索 {{ turn.meta.retrieved }} 条 · 首条相关度
                   {{ (turn.meta.top_score * 100).toFixed(0) }}%
                 </span>
@@ -450,7 +473,9 @@ useReveal(root, packLoading)
               <p v-if="turn.answer" class="turn__body body" v-html="renderText(turn.answer)" />
               <p v-else-if="turn.streaming" class="turn__body body turn__pending">
                 <span class="dots"><i /><i /><i /></span>
-                正在检索知识库…
+                <!-- meta 先于 delta 到达，所以这里已经知道走的是哪条链路；
+                     `general` 不检索，说"正在检索知识库"就是假动作 -->
+                {{ turn.meta?.route === 'general' ? '正在生成回答…' : '正在检索知识库…' }}
               </p>
 
               <p v-if="turn.error" class="turn__err small">{{ turn.error }}</p>
@@ -523,7 +548,7 @@ useReveal(root, packLoading)
             />
             <div class="composer__actions">
               <span class="cap muted">
-                Enter 发送 · Shift+Enter 换行 · 回答只依据知识库，超出范围会直说
+                Enter 发送 · Shift+Enter 换行 · 汉中问题先查知识库，本地事实查不到会直说
               </span>
               <div class="row">
                 <button v-if="streaming" class="btn btn-ghost btn-sm" type="button" @click="stop">
