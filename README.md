@@ -90,7 +90,16 @@ cp .env.example .env
 python scripts/build_kb.py --api
 
 # 3. 起 AI 服务（无状态、不连业务库）
-cd server-ai && .venv/Scripts/python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+cd server-ai && .venv/Scripts/python.exe run_dev.py        # 等价于下面这条
+# cd server-ai && .venv/Scripts/python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+# 需要改代码自动重启时加 --reload（只盯 app/ 目录，不扫 .venv）
+#
+# 为什么有个 run_dev.py：app/main.py 里没有 `if __name__ == "__main__"` 入口块，
+# 在 IDE 里右键 Run main.py 会「导入完立刻退出、退出码 0、控制台无输出」，
+# 看起来像跑不起来。run_dev.py 补上入口，让 IDE 的绿色三角可以直接点。
+# PyCharm 用户：直接点 run_dev.py 左侧行号旁的绿色三角即可。
+# （运行配置「AI 服务 (uvicorn :8000)」已生成在本地 .idea/ 里，会出现在
+#   右上角下拉框；但 .idea/ 不进版本库，换机器要重新生成一份。）
 
 # 4. 起业务后端与前端
 cd server-java && mvn spring-boot:run      # 8080
