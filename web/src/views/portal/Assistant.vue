@@ -5,6 +5,7 @@ import { getCityPack } from '@/api/citypack'
 import SceneArt from '@/components/SceneArt.vue'
 import { useAsync } from '@/composables/useAsync'
 import { useReveal } from '@/composables/useReveal'
+import { inlineText } from '@/utils/format'
 import {
   QA_DOC_TYPE_LABEL,
   QA_MODE_LABEL,
@@ -197,19 +198,6 @@ function reset() {
   turns.value = []
   seq = 0
   void nextTick(() => composer.value?.focus())
-}
-
-/**
- * 极简内联格式：先转义 HTML，再把 **加粗** 换成 strong。
- * 不是 Markdown 渲染器——只处理模型实际会用的这一种标记。
- * 先转义再插标签，所以模型输出的尖括号不会变成标签。
- */
-function renderText(text: string) {
-  return text
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
 }
 
 const SOURCE_KIND = QA_DOC_TYPE_LABEL
@@ -470,7 +458,7 @@ useReveal(root, packLoading)
                 </span>
               </div>
 
-              <p v-if="turn.answer" class="turn__body body" v-html="renderText(turn.answer)" />
+              <p v-if="turn.answer" class="turn__body body" v-html="inlineText(turn.answer)" />
               <p v-else-if="turn.streaming" class="turn__body body turn__pending">
                 <span class="dots"><i /><i /><i /></span>
                 <!-- meta 先于 delta 到达，所以这里已经知道走的是哪条链路；

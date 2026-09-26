@@ -12,7 +12,7 @@ M4 是它的自然延伸 —— **知识库之外再多几路数据源**（高�
 |---|---|
 | `none`（与汉中无关） | `SYSTEM_PROMPT_GENERAL` |
 | `knowledge_search` | `SYSTEM_PROMPT_RAG` / `_CONSTRAINED`（按 `qa._route` 分流） |
-| `search_nearby` / `search_poi` | 新增 `SYSTEM_PROMPT_TOOLS` |
+| `search_nearby` / `search_poi` / `plan_itinerary` | 新增 `SYSTEM_PROMPT_TOOLS` |
 
 ## 为什么是「JSON 路由器」而不是原生 function calling
 
@@ -42,6 +42,20 @@ OpenAI 兼容接口的 `tools` 参数当然能用，但这里刻意不用，理�
 M3 的 `AnswerCache` 在这里用不上：Agent 的回答依赖**实时工具数据**
 （此刻的高德结果），把某一次的结果缓存下来回放，等于给用户看一份过期的酒店列表。
 断网时走的是另一条路：规则兜底到知识库摘录，见 `_fallback_decision`。
+
+## 行程上下文（第二阶段）
+
+`stream(question, context)` 的 `context` 是**服务端**从 `trip_context` 读出来的
+本次行程上下文（目的地、已选住处及坐标、预订状态），由 Java 侧放进请求体。
+前端传不了它 —— 否则任何人都能伪造"我住在某某酒店"去影响检索结果。
+
+它解决的是"助手记不住"这件事：用户上一轮在卡片上点了"选择酒店"，
+这一轮问"这附近有什么好吃的"，`search_nearby` 会以**那家酒店的坐标**为中心
+（见 `tools._search_nearby` 的三级回退）。没有它，用户就得每次重述自己住哪，
+而"附近"这个词在每一轮对话里都是悬空的。
+
+`context` 为 `None` 或空字典时，整条链路的行为与第一阶段**完全一致** ——
+未登录用户走的就是这条路。
 """
 
 from __future__ import annotations
@@ -50,9 +64,10 @@ import json
 import logging
 import re
 import time
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Mapping
 
-from . import tools
+from . import places, tools
+from .itinerary import ItineraryPlanner
 from .llm import (
     ROUTE_GENERAL,
     build_messages,
@@ -116,6 +131,15 @@ class AgentService:
         self.settings = settings
         self.store = store
         self.amap = amap
+        # 地名解析器（`places.py`）：把用户说的地名变成可信的搜索中心坐标。
+        # 在构造时建一次、而不是每次提问新建 —— 本地地名表是只读的，
+        # 每次提问都重读一遍文件、重建索引是白费。它只在 `search_nearby`
+        # 解析中心点时用到，其余工具不看。
+        self.places = places.create_resolver(settings, amap)
+        # 行程规划器（`itinerary.py`）：同样只读一次数据包（构造时要读
+        # `pois.json` 并算出城市中心落在哪个区县），之后每次规划都复用。
+        # 它**不需要高德**，所以高德没配时它照样可用。
+        self.planner = ItineraryPlanner(settings.city_dir, settings.city_center)
 
     # ---- 给 /ai/health 用 ----
 
@@ -136,6 +160,10 @@ class AgentService:
         点了必然失败（`search_nearby` 不可用）。让后端按实际能力给例子，
         前端不需要自己判断"现在能不能演示地图"——那种判断散在前端，
         迟早有一处漏了，变成一个点不出结果的引导按钮。
+
+        **行程那一组不带条件**：`plan_itinerary` 读的是数据包，不需要高德，
+        也不需要模型（离线时由工具自己排、只少了模型润色）。给它加个
+        `if amap_ok` 会让"没配高德"的机器白白藏起一个能用的功能。
         """
         amap_ok = bool(self.amap and self.amap.enabled)
         groups: list[dict[str, Any]] = []
@@ -146,11 +174,25 @@ class AgentService:
                     "title": "调用高德地图（真实 POI）",
                     "items": [
                         "汉中高铁站附近推荐酒店",
+                        # 举一个**区县**的例子：汉中有 2 区 9 县，用户不知道
+                        # 系统支持按区县查时，只会反复问市区。这一条是给能力做广告的。
+                        "宁强县有什么酒店",
                         "汉中市区附近有什么好吃的",
-                        "汉中火车站附近有哪些景点",
+                        "留坝县附近有什么景点",
                     ],
                 }
             )
+
+        groups.append(
+            {
+                "title": "排行程（读本地数据包，不需要联网）",
+                "items": [
+                    "帮我规划汉中两日游",
+                    "汉中三天怎么玩",
+                    "带小孩去汉中玩两天怎么安排",
+                ],
+            }
+        )
 
         groups.append(
             {
@@ -166,12 +208,19 @@ class AgentService:
 
     # ---- 主流程 ----
 
-    async def stream(self, question: str) -> AsyncIterator[dict[str, Any]]:
+    async def stream(
+        self, question: str, context: Mapping[str, Any] | None = None
+    ) -> AsyncIterator[dict[str, Any]]:
         started = time.monotonic()
         question = (question or "").strip()
         if not question:
             yield {"type": "error", "message": "问题不能为空"}
             return
+
+        # 上下文只认字典。传了别的东西（None / 字符串 / 数组）一律当"没有上下文"，
+        # 而不是抛异常：它是增强项，坏了不该让整轮对话失败。
+        context = context if isinstance(context, Mapping) else None
+        hotel = self._hotel_of(context)
 
         amap_ok = bool(self.amap and self.amap.enabled)
 
@@ -181,13 +230,29 @@ class AgentService:
             "generator": self.settings.llm_model if self.settings.llm_enabled else "extractive",
             "city": self.settings.city_name,
             "amap": amap_ok,
-            "tools": [spec.name for spec in tools.TOOL_SPECS] if amap_ok else [tools.TOOL_KNOWLEDGE],
+            # **与 /ai/health 用同一处定义**（`tools.available_tools`）。
+            # 早先这里写的是"高德没配就只报 knowledge_search"，加了
+            # `plan_itinerary`（不需要高德）之后那句话就变成假的了 ——
+            # 前端会据此把行程示例问题藏起来，而它其实可用。
+            "tools": [spec.name for spec in tools.available_tools(amap_ok)],
         }
+
+        # 把"这一轮到底有没有记忆"写进日志。前端看 /api/trips/current 就知道，
+        # 但排查"为什么助手没记住"时，需要一条能证明上下文到达了这一侧的记录 ——
+        # 否则只能靠猜"是没传过来，还是传了没用上"。
+        if context:
+            logger.info(
+                "[Agent] 行程上下文 目的地=%s 已选酒店=%s",
+                context.get("destination"),
+                hotel.get("name") if hotel else "（无）",
+            )
+        else:
+            logger.info("[Agent] 本次没有行程上下文（未登录或未选择住处）")
 
         # 1) 决定用哪个工具
         if self.settings.llm_enabled:
             try:
-                name, args, raw = await self._decide(question)
+                name, args, raw = await self._decide(question, context)
                 logger.info("[Agent] 决策 tool=%s args=%s raw=%s", name, args, raw[:200])
             except Exception as exc:  # noqa: BLE001 - 决策失败不该让整轮失败
                 logger.warning("[Agent] 决策失败，退回知识库：%s", exc)
@@ -202,7 +267,7 @@ class AgentService:
                 "type": "tool",
                 "name": name,
                 "status": "running",
-                "label": self._label(name, args),
+                "label": self._label(name, args, context),
             }
             tool_started = time.monotonic()
             result = tools.execute(
@@ -210,15 +275,18 @@ class AgentService:
                 args,
                 store=self.store,
                 amap=self.amap,
+                resolver=self.places,
+                planner=self.planner,
                 top_k=self.settings.top_k,
                 city_name=self.settings.city_name,
                 city_center=self.settings.city_center,
+                hotel=hotel,
             )
             yield {
                 "type": "tool",
                 "name": name,
                 "status": "done" if result.ok else "error",
-                "label": result.label or self._label(name, args),
+                "label": result.label or self._label(name, args, context),
                 "count": result.count,
                 "elapsed_ms": int((time.monotonic() - tool_started) * 1000),
                 "error": result.error,
@@ -229,7 +297,7 @@ class AgentService:
 
         # 3) 组织回答
         try:
-            async for piece in self._generate(question, name, result):
+            async for piece in self._generate(question, name, result, context):
                 yield {"type": "delta", "text": piece}
         except Exception as exc:  # noqa: BLE001 - 模型失败要让前端知道，而不是静默截断
             yield {"type": "error", "message": f"生成失败：{exc}"}
@@ -244,22 +312,56 @@ class AgentService:
 
     # ---- 内部 ----
 
-    def _label(self, name: str, args: dict[str, Any]) -> str:
+    @staticmethod
+    def _hotel_of(context: Mapping[str, Any] | None) -> dict[str, Any] | None:
+        """从上下文里取出已选住处。没选或结构不对时返回 None。"""
+        if not context:
+            return None
+        hotel = context.get("selected_hotel")
+        return dict(hotel) if isinstance(hotel, Mapping) else None
+
+    def _label(
+        self, name: str, args: dict[str, Any], context: Mapping[str, Any] | None = None
+    ) -> str:
+        """工具运行中显示的那句话。
+
+        这一步**发生在工具执行之前**，所以中心点还没解析出来。这里只能按
+        "用户点名了中心 / 有已选酒店 / 都没有"三种情况给一个诚实的预告，
+        真正的中心名由 `tools._search_nearby` 解析后放进 tool 事件的 label。
+        """
         if name == tools.TOOL_NEARBY:
             center = str(args.get("center") or "").strip()
-            return f"正在搜索「{center}」附近…" if center else f"正在搜索{self.settings.city_name}市区附近…"
+            if center:
+                return f"正在搜索「{center}」附近…"
+            hotel = self._hotel_of(context)
+            hotel_name = str((hotel or {}).get("name") or "").strip()
+            if hotel_name:
+                return f"正在搜索您选择的「{hotel_name}」附近…"
+            return f"正在搜索{self.settings.city_name}市区附近…"
         if name == tools.TOOL_POI:
             return f"正在搜索「{args.get('keywords') or ''}」…"
         if name == tools.TOOL_KNOWLEDGE:
             return "正在检索本地知识库…"
+        if name == tools.TOOL_PLAN:
+            # 天数可能来自模型、也可能没给（工具会按 2 天兜底）。这里不猜，
+            # 给不出天数就只说"正在排行程"，不编一个"2 天"进 label ——
+            # 万一工具按别的天数排出来，label 和结果就对不上了。
+            try:
+                days = int(args.get("days") or 0)
+            except (TypeError, ValueError):
+                days = 0
+            span = f" {days} 天" if days > 0 else ""
+            return f"正在规划{self.settings.city_name}{span}行程…"
         return "正在思考…"
 
-    async def _decide(self, question: str) -> tuple[str, dict[str, Any], str]:
+    async def _decide(
+        self, question: str, context: Mapping[str, Any] | None = None
+    ) -> tuple[str, dict[str, Any], str]:
         menu = tools.tool_menu(
             bool(self.amap and self.amap.enabled), self.settings.city_name
         )
         messages = build_router_messages(
-            question, menu, city=self.settings.city_name
+            question, menu, city=self.settings.city_name, context=context
         )
         raw = await complete_llm(self.settings, messages, max_tokens=200)
         name, args = _parse_decision(raw)
@@ -275,7 +377,11 @@ class AgentService:
         return tools.TOOL_KNOWLEDGE, {"query": question}
 
     async def _generate(
-        self, question: str, name: str, result: tools.ToolResult
+        self,
+        question: str,
+        name: str,
+        result: tools.ToolResult,
+        context: Mapping[str, Any] | None = None,
     ) -> AsyncIterator[str]:
         if self.settings.llm_enabled:
             if name == tools.TOOL_NONE:
@@ -283,7 +389,9 @@ class AgentService:
                     question, [], ROUTE_GENERAL, city=self.settings.city_name
                 )
             elif name == tools.TOOL_KNOWLEDGE and result.hits:
-                # 走 M3 那条路：分流规则、提示词、来源策略全部复用
+                # 走 M3 那条路：分流规则、提示词、来源策略全部复用。
+                # **刻意不传上下文** —— 这条路上的问题是"汉中仙毫是什么茶"
+                # 这类事实问题，答案与用户住哪无关（详见 llm.build_tool_messages）。
                 gaps = self.store.topic_gaps(question)
                 route = _route(question, gaps, self.settings.city_name)
                 messages = build_messages(
@@ -304,7 +412,11 @@ class AgentService:
                 elif result.count == 0:
                     note = "本次工具没有返回任何结果。请如实说明，不要用别的数据凑数。"
                 messages = build_tool_messages(
-                    question, result.text, city=self.settings.city_name, note=note
+                    question,
+                    result.text,
+                    city=self.settings.city_name,
+                    note=note,
+                    context=context,
                 )
             async for piece in stream_llm(self.settings, messages):
                 yield piece

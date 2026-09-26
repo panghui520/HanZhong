@@ -636,6 +636,7 @@ export const AGENT_TOOL_LABEL: Record<string, string> = {
   knowledge_search: '本地知识库',
   search_nearby: '高德 · 附近搜索',
   search_poi: '高德 · 关键词搜索',
+  plan_itinerary: '本地数据包 · 行程规划',
   none: '直接回答',
 }
 
@@ -689,6 +690,15 @@ export interface AgentCard {
   typecode: string
   /** 中文类别，例"宾馆酒店"。由 typecode 前两位映射，不是高德原文 */
   category: string
+  /**
+   * 这张卡片自己的类别（M4 阶段二新增）。取值是 {@link AgentPoiCardKind}，
+   * 由 typecode 前两位决定。
+   *
+   * **不要用 `cards` 事件上的 kind 代替它**：事件上的 kind 是"这批结果整体
+   * 是什么"（取第一条的大类），而"这张卡片能不能被选为住处"必须逐张判断 ——
+   * 否则混合结果里只要第一条不是酒店，那张酒店卡片就不会有「选择」按钮。
+   */
+  kind: AgentPoiCardKind
   lng: number | null
   lat: number | null
   distance_m: number | null
@@ -726,29 +736,83 @@ export interface AgentSourceCard {
 }
 
 /**
- * 卡片类别。**这是一个封闭集合**，由后端定义：
- *   - `knowledge` —— 知识库来源（`AgentSourceCard`）
- *   - 其余五种 —— 高德 POI（`AgentCard`），由 POI 类型码前两位映射
- * 见 server-ai/app/tools.py 的 `_KIND_BY_MAJOR` 与 `_knowledge_search`。
+ * 高德 POI 卡片的类别。**与 {@link AgentCardKind} 分开**：
+ * 这个集合里的每一种都是"一个地点"，所以它才能被当成 AgentCard 的 kind；
+ * 而 `knowledge`（一条来源）和 `itinerary`（一份行程）都不是地点，
+ * 它们的字段与 AgentCard 几乎不重叠，混进同一个类型只会到处写可选字段。
+ *
+ * 取值由后端 POI 类型码前两位映射，见 server-ai/app/tools.py 的 `_KIND_BY_MAJOR`。
  */
-export type AgentCardKind =
-  | 'knowledge'
-  | 'hotel'
-  | 'restaurant'
-  | 'attraction'
-  | 'transport'
-  | 'poi'
+export type AgentPoiCardKind = 'hotel' | 'restaurant' | 'attraction' | 'transport' | 'poi'
 
 /**
- * 卡片按类分组下发。`kind` 是判别式：`knowledge` 时 `items` 是来源卡片，
- * 其余情况是高德 POI 卡片。前端必须按它分支渲染 ——
- * 两种卡片字段几乎不重叠，混着渲染的结果是整片空白。
+ * 卡片类别。**这是一个封闭集合**，由后端定义：
+ *   - `knowledge` —— 知识库来源（`AgentSourceCard`）
+ *   - `itinerary` —— 一份按天排的行程（`AgentItineraryCard`）
+ *   - 其余五种 —— 高德 POI（`AgentCard`），由 POI 类型码前两位映射
+ * 见 server-ai/app/tools.py 的 `_KIND_BY_MAJOR` 与 `_knowledge_search` / `_plan_itinerary`。
+ */
+export type AgentCardKind = 'knowledge' | 'itinerary' | AgentPoiCardKind
+
+/**
+ * 行程里的一站。字段**逐字来自数据包**（`citypack/<city>/pois.json`），
+ * 不经过模型 —— 与 POI 卡片同一个理由：用户会照着 `name` 去导航。
+ */
+export interface AgentItineraryStop {
+  poi_id: string
+  name: string
+  district: string
+  /** 景区级别，如 "4A"。乡村业态是"省级乡村旅游示范村"这类，不是低等级 */
+  level: string
+  /** 建议游览时长（分钟） */
+  duration_min: number
+  open_hours: string
+  /** 0 = 免费；null = 未知。**两者必须分开显示** */
+  ticket_price: number | string | null
+  summary: string
+  tags: string[]
+}
+
+export interface AgentItineraryDay {
+  day: number
+  /** 这一天的区县。**同一天只会有一个** —— 这是行程算法唯一的硬保证 */
+  district: string
+  minutes: number
+  over_budget: boolean
+  stops: AgentItineraryStop[]
+}
+
+/**
+ * 一份行程。**它是一张卡、不是一批卡** —— 拆成"每个景点一张卡"就丢掉了
+ * 天数与区县这两个最关键的字段，而用户要看的恰恰是"第一天在汉台区、
+ * 第二天在南郑区"。
+ *
+ * `requested_days`（用户要几天）与 `days.length`（真的排出来几天）分开：
+ * 数据包里的点不够时算法会少排，界面要能如实显示"要 3 天、排出 2 天"，
+ * 而不是把 2 天冒充成 3 天。
+ */
+export interface AgentItineraryCard {
+  kind: 'itinerary'
+  title: string
+  requested_days: number
+  days: AgentItineraryDay[]
+  minutes_per_day: number
+  preference: string
+  notes: string[]
+}
+
+/**
+ * 卡片按类分组下发。`kind` 是判别式，**前端必须按它分支渲染**：
+ * `knowledge` 时 `items` 是来源卡片、`itinerary` 时是**一张**行程卡
+ * （它本身就是数组里唯一那项）、其余是高德 POI 卡片。
+ * 三种卡片字段几乎不重叠，混着渲染的结果是整片空白。
  */
 export type AgentCardsEvent =
   | { type: 'cards'; kind: 'knowledge'; items: AgentSourceCard[] }
+  | { type: 'cards'; kind: 'itinerary'; items: AgentItineraryCard[] }
   | {
       type: 'cards'
-      kind: 'hotel' | 'restaurant' | 'attraction' | 'transport' | 'poi'
+      kind: AgentPoiCardKind
       items: AgentCard[]
     }
 
@@ -796,14 +860,85 @@ export interface AgentTurn {
   meta: AgentMetaEvent | null
   /** 最近一次工具事件。running → done 就地更新，不追加新行 */
   tool: AgentToolEvent | null
-  /** 高德 POI 卡片。走知识库那条路时为空 */
+  /** 高德 POI 卡片。走知识库 / 行程那条路时为空 */
   cards: AgentCard[]
-  /** 知识库来源卡片。走高德那条路时为空 */
+  /** 知识库来源卡片。走高德 / 行程那条路时为空 */
   sources: AgentSourceCard[]
+  /**
+   * 行程卡片。**单独一格，不塞进 cards** —— 它是一份整体方案（哪天去哪几个点），
+   * 而 cards 是"一批同类的点"。混在一起会让"逐张渲染 + 每张一个选择按钮"
+   * 那套逻辑作用在一份行程上。
+   */
+  itinerary: AgentItineraryCard | null
   /** 卡片类别，模板据此决定渲染哪种卡片 */
   cardKind: string
   elapsedMs: number
   streaming: boolean
   error: string
+}
+
+/* ============================================================
+ * M4 阶段二：当前行程与上下文
+ *
+ * 后端：`/api/trips/**`（需要登录），见 TripController / TripService。
+ *
+ * 这一组类型存在的理由只有一条：**让助手记得住**。用户上一轮在卡片上
+ * 点了「选择酒店」，下一轮问「这附近有什么好吃的」，服务端就能用
+ * 已选酒店的坐标去搜附近，而不是反问他住哪。
+ *
+ * 注意这是**用户自己的数据**，所以整组接口都要登录；未登录时页面照常
+ * 可用，只是没有记忆（见 Agent.vue 的说明）。
+ * ============================================================ */
+
+/**
+ * 本次行程已选的住处。
+ *
+ * **坐标是字符串**，不是 number。这两个值的唯一用途是被回读并原样拼进
+ * 高德的 `location` 参数（`"经度,纬度"`），走 number 就要在
+ * "序列化 → 前端 → 反序列化 → 拼字符串"这条链上反复经过二进制浮点，
+ * 每一跳都可能出现 107.01999999999999 这种非法坐标。后端同理，
+ * 见 SelectedHotelVO 的说明。
+ */
+export interface SelectedHotel {
+  poi_id: string
+  name: string
+  address: string
+  /** 经度。高德坐标是"经度,纬度"，经度在前 */
+  longitude: string
+  latitude: string
+  /** 拼好的 "经度,纬度"，与高德 location 参数格式一致 */
+  location: string
+  /** 数据来源，当前恒为 amap */
+  source: string
+}
+
+/** 当前行程与它的上下文 */
+export interface TripContext {
+  trip_id: number
+  /** 业务编码，形如 2026-hanzhong-001 */
+  trip_code: string
+  destination: string
+  destination_code: string
+  /** ACTIVE / ARCHIVED */
+  status: string
+  /** 已选住处。没选时这个字段整个不出现（后端配了 non_null） */
+  hotel?: SelectedHotel
+  /** not_booked / external_pending / booked / cancelled */
+  hotel_booking_status: string
+}
+
+/**
+ * 预订状态的中文。
+ *
+ * 当前只会出现 `not_booked` —— 本系统**不代办预订**，也不接美团/携程的
+ * 内部接口。这一列现在建出来、并且要参与提示词，是因为助手得知道
+ * "这家还没订"才敢说"建议先预订"；等阶段五真的加了"去第三方预订"的跳转，
+ * 其余三档才会被写出来。
+ */
+export const HOTEL_BOOKING_LABEL: Record<string, string> = {
+  not_booked: '未预订',
+  external_pending: '已跳转第三方，待确认',
+  booked: '已预订',
+  cancelled: '已取消',
 }
 

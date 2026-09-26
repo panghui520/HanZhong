@@ -74,3 +74,26 @@ export function countdown(seconds: number): string {
   const s = Math.floor(seconds % 60)
   return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
 }
+
+/**
+ * 模型回答的极简内联格式：先转义 HTML，再把 `**加粗**` 换成 `<strong>`。
+ *
+ * **不是 Markdown 渲染器** —— 只处理模型实际会用的这一种标记。刻意不引
+ * 一个 markdown 库：那会连带处理链接、图片、HTML 内联，而回答里的链接
+ * 必须来自知识库元数据（见 `_source_payload`），交给模型写就有编造的可能。
+ *
+ * 先转义再插标签，所以模型输出里的尖括号不会变成标签 —— 这个函数的结果
+ * 是配 `v-html` 用的，顺序反了就是一个注入点。
+ *
+ * 原本在 `views/portal/Assistant.vue` 里写了一份，M4 的旅游助手页要用同一种
+ * 呈现（不然同一个模型、同一套提示词，在知识问答页是粗体、在助手页是一串
+ * 星号）。两个页面各写一份迟早会有一处被改（比如加上 `*斜体*`），
+ * 于是同一句话在两页显示成两种样子 —— 用户会以为是两个不同的模型。
+ */
+export function inlineText(text: string): string {
+  return String(text ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+}

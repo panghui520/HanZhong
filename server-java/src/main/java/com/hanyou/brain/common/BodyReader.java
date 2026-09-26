@@ -1,5 +1,6 @@
 package com.hanyou.brain.common;
 
+import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -65,6 +66,45 @@ public final class BodyReader {
             }
             if ("false".equalsIgnoreCase(s)) {
                 return Boolean.FALSE;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 取小数（M4 起）。JSON 里可能是数字也可能是字符串，两种都接；
+     * 空串、非数字文本、数组、对象一律返回 null，由服务层给出错误码。
+     *
+     * <p><b>这里刻意不用 {@code new BigDecimal(double)}。</b>
+     * 那个构造器取的是 double 的**精确二进制值**：
+     * {@code new BigDecimal(107.02)} 得到的是 107.01999999999999602...，
+     * 因为 107.02 在二进制里本来就不能被精确表示。
+     * 坐标一旦这样进库，再被读出来拼成高德的 {@code location} 参数，
+     * 就是一个非法坐标 —— 而且它在日志里看起来"差不多是对的"，很难发现。
+     * {@code BigDecimal.valueOf(double)} 走的是 {@code Double.toString}
+     * 的十进制最短表示，才真的得到 107.02。
+     *
+     * <p>这个区别在金额上同样会咬人，所以方法放在这里共用，
+     * 而不是各自在 Service 里写一遍。
+     */
+    public static BigDecimal decimal(Map<String, Object> body, String key) {
+        Object v = body.get(key);
+        // BigDecimal 也是 Number，必须先判，否则会被下面按 double 绕一圈
+        if (v instanceof BigDecimal bd) {
+            return bd;
+        }
+        if (v instanceof Number n) {
+            return BigDecimal.valueOf(n.doubleValue());
+        }
+        if (v instanceof String s) {
+            String t = s.trim();
+            if (t.isEmpty()) {
+                return null;
+            }
+            try {
+                return new BigDecimal(t);
+            } catch (NumberFormatException e) {
+                return null;
             }
         }
         return null;

@@ -198,9 +198,27 @@ def _sse(events) -> StreamingResponse:
     )
 
 
+async def _body_of(request: Request) -> dict[str, Any]:
+    """读请求体，**空体与非 JSON 都当成空字典**。
+
+    不这么做的话，`await request.json()` 在空体上抛 `JSONDecodeError`，
+    FastAPI 把它变成 500 —— 而 500 是"服务坏了"的意思，实际发生的事是
+    "你没发请求体"。两者对排查的人是完全不同的指引。
+
+    两个流式端点都用它，是为了让它们的容错行为一致：只修一个的话，
+    同一个客户端在 `/ai/qa` 上拿到 500、在 `/ai/agent` 上拿到
+    "问题不能为空"，会以为是自己用错了接口。
+    """
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001 - 任何解析失败都按"没有请求体"处理
+        return {}
+    return body if isinstance(body, dict) else {}
+
+
 @app.post("/ai/qa")
 async def qa(request: Request, _: None = Depends(require_token)) -> StreamingResponse:
-    body = await request.json()
+    body = await _body_of(request)
     question = str(body.get("question", ""))
     return _sse(_service(request).stream(question))
 
@@ -229,7 +247,26 @@ async def agent(request: Request, _: None = Depends(require_token)) -> Streaming
 
     `cards` 里的字段**全部来自高德返回**，模型不参与生成 ——
     这是"不让模型编造真实旅游数据"这条红线的实现方式。
+
+    第二阶段起请求体多一个可选的 `context`（本次行程上下文）：
+
+        {"question": "这附近有什么好吃的",
+         "context": {"destination": "汉中",
+                     "selected_hotel": {"poi_id": "...", "name": "...",
+                                        "address": "...",
+                                        "location": "107.020000,33.070000",
+                                        "source": "amap"},
+                     "hotel_booking_status": "not_booked"}}
+
+    它由 Java 侧从 `trip_context` 读出来，**前端传不了** —— 否则任何人都能
+    伪造"我住在某某酒店"去影响检索结果。缺省或为空时，整条链路与第一阶段
+    完全一致（未登录用户走的就是这条路）。
     """
-    body = await request.json()
+    body = await _body_of(request)
     question = str(body.get("question", ""))
-    return _sse(_agent_service(request).stream(question))
+    context = body.get("context")
+    return _sse(
+        _agent_service(request).stream(
+            question, context if isinstance(context, dict) else None
+        )
+    )

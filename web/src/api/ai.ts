@@ -5,7 +5,7 @@ import type {
   QaEvent,
   QaHandlers,
 } from '@/types'
-import { ApiError, request } from './http'
+import { ApiError, authHeaders, request } from './http'
 
 /**
  * AI 能力（M3 知识问答 + M4 旅游助手）的接口层。
@@ -124,7 +124,16 @@ function openStream(
     try {
       res = await fetch(`${API_ROOT}${AI_PATH}${path}`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
+        // 必须带令牌：`/api/ai/**` 是公开接口，但**登录与否会改变它做什么** ——
+        // 带了令牌，Java 侧才知道"这是谁"，才能把当前行程的上下文（目的地、
+        // 已选酒店的坐标）交给 Python。不带令牌它就以游客身份执行，
+        // 助手在界面上永远记不住行程，而**接口本身仍然返回 200**，
+        // 所以这个漏法不会报任何错，只能靠"选完酒店再问附近"这条链路才测得出来。
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'text/event-stream',
+          ...authHeaders(),
+        },
         body: JSON.stringify({ question }),
         signal: controller.signal,
       })

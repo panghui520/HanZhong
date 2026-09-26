@@ -37,10 +37,15 @@ export function setUnauthorizedHandler(fn: UnauthorizedHandler) {
 /**
  * 需要登录的接口路径前缀：命中这些路径的 4001/4002 才触发全局登出。
  *
- * `/cart` 与 `/orders` 是 M6 的"我的数据"，未登录时后端返回 4001，
- * 应当把本地会话清掉并跳登录页 —— 否则用户会看到一个一直转圈的空页面。
+ * `/cart` 与 `/orders` 是 M6 的"我的数据"，`/trips` 是 M4 的当前行程 ——
+ * 未登录时后端返回 4001，应当把本地会话清掉并跳登录页，
+ * 否则用户会看到一个一直转圈的空页面。
+ *
+ * 注意：触发跳登录的前提是**真的调了这些接口**。助手页在未登录时
+ * 不会去调 `/trips/current`（见 Agent.vue 的 loadTrip），
+ * 否则一个只想问问路的游客会被弹到登录页。
  */
-const PROTECTED_PREFIXES = ['/me', '/cart', '/orders']
+const PROTECTED_PREFIXES = ['/me', '/cart', '/orders', '/trips']
 
 function isProtected(path: string) {
   return PROTECTED_PREFIXES.some((p) => path === p || path.startsWith(`${p}/`))
@@ -62,6 +67,24 @@ function readToken(): string {
   } catch {
     return ''
   }
+}
+
+/**
+ * 给需要**自建 fetch** 的调用方拼上令牌。
+ *
+ * 目前只有一处用：SSE 流式问答（api/ai.ts 的 openStream）。
+ * 它不能走 {@link request}，因为那条路要把响应整个读成 JSON，
+ * 而流式响应必须边读边吐。
+ *
+ * 抽出来而不是让 ai.ts 自己读 localStorage：令牌的读法只能有一份，
+ * 否则改存储格式（或以后换成 Cookie）时会漏掉一处 ——
+ * 而漏掉的那一处**不会报错**，只会表现为"这个功能拿不到用户"。
+ * 实测就踩过：openStream 一开始没带令牌，于是 /api/ai/agent 永远以
+ * 游客身份执行，助手在界面上永远记不住行程，而所有接口测试都是通过的。
+ */
+export function authHeaders(): Record<string, string> {
+  const token = readToken()
+  return token ? { Authorization: `Bearer ${token}` } : {}
 }
 
 /**

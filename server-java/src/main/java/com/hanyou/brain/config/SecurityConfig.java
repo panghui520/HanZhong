@@ -119,6 +119,13 @@ public class SecurityConfig {
                         // 但运营上传接口不能被放开给所有人。
                         .requestMatchers("/api/reviews/**").authenticated()
 
+                        // ---------------- 需要登录：M4 当前行程与上下文 ----------------
+                        // 行程是"我的数据"，与购物车同理。注意 /api/ai/** 在上面
+                        // 是 permitAll 的 —— 助手本身不需要登录，只是未登录时
+                        // 服务端拿不到行程上下文，助手就没有记忆。这个降级是
+                        // 刻意的：问答的核心价值不依赖登录。
+                        .requestMatchers("/api/trips/**").authenticated()
+
                         // 认证后与个人相关的接口（当前只有 me/logout，见 AuthController）
                         .requestMatchers("/api/me/**").authenticated()
 

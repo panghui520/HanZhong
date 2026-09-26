@@ -1,15 +1,23 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { useRouter } from 'vue-router'
 import { askAgent, getAiHealth } from '@/api/ai'
+import { clearTripHotel, getCurrentTrip, selectTripHotel } from '@/api/trips'
 import PoiImage from '@/components/PoiImage.vue'
 import { useAsync } from '@/composables/useAsync'
+import { useSessionStore } from '@/stores/session'
+import { clearAgentTurns, loadAgentTurns, saveAgentTurns } from '@/utils/agentChat'
+import { inlineText } from '@/utils/format'
 import {
   AGENT_TOOL_LABEL,
+  HOTEL_BOOKING_LABEL,
   QA_DOC_TYPE_LABEL,
   QA_SOURCE_KIND_LABEL,
   type AgentCard,
+  type AgentItineraryDay,
   type AgentSourceCard,
   type AgentTurn,
+  type TripContext,
 } from '@/types'
 
 /**
@@ -40,10 +48,35 @@ import {
  * ============================================================
  * 阶段说明
  * ============================================================
- * 本页是 M4 的**第一阶段**（高德 + 附近搜索 + 酒店卡片）。
- * 「选择酒店」（把酒店存进旅行上下文）与「去预订」（跳转第三方）
- * 分别在阶段二与阶段五，代码里对应位置留了 TODO 锚点，
+ * 已实现：阶段一（高德 + 附近搜索 + 酒店卡片）、
+ * **阶段二（行程上下文 + 选择酒店 + "这附近"有确定指代）**。
+ *
+ * 阶段二做的是"让助手记得住"：用户在高德返回的酒店卡片上点「选择酒店」，
+ * 服务端把它写进 trip_context，此后他问"这附近有什么好吃的"时，
+ * 搜索中心就是那家酒店的坐标 —— **不用再报一次住哪**。
+ * 这条链路要登录才有；未登录时本页照常可用，只是没有记忆。
+ *
+ * 「去预订」（跳转第三方）在阶段五，代码里留了 TODO 锚点。
+ * 现在不放这个按钮：它做不了真事，放上去就是假的。
  * 见 docs/M4-第一阶段设计分析.md。
+ *
+ * ============================================================
+ * 对话历史会留下来
+ * ============================================================
+ * `turns` 从 sessionStorage 恢复，所以**切页、组件重新挂载、刷新页面**之后
+ * 对话都还在。存在 sessionStorage 而不是 localStorage 的理由见
+ * `utils/agentChat.ts` 的模块说明 —— 一句话：它是"这一次访问的对话"，
+ * 不是长期资产，也不该在换个人用同一台机器时留给下一个人看。
+ *
+ * 落盘时机是**有限的四处**（轮次结束 / 组件卸载 / 整页刷新 / 清空），
+ * 不是 `watch` 全量：流式回答每个 token 都改 `turn.answer`，
+ * 全量监听等于每吐一个字就序列化一遍整段历史。
+ *
+ * **已知边界：同一个标签页里换账号登录，仍会看到上一个人的对话。**
+ * 上面说的"不留给下一个人"指的是**关掉标签页之后**（sessionStorage 按标签页
+ * 隔离）。同标签页内退出再登录，存储不归账号管，得靠「清空对话」。
+ * 要做成按账号隔离，得在登录/退出时同步清理 —— 而退出登录会先跳走再卸载组件，
+ * 卸载时的落盘会把刚清掉的又写回去，所以不能只在 store 里清。
  */
 
 // ---------------------------------------------------------------- 能力状态
@@ -72,13 +105,31 @@ const status = computed(() => {
 
 // ------------------------------------------------------------------ 对话
 
-const turns = ref<AgentTurn[]>([])
+/**
+ * 对话历史**从 sessionStorage 恢复**。
+ *
+ * 原本 `turns` 是个裸的 `ref([])`，组件一卸载就没了 —— 切到探索页看看景点
+ * 再切回来、或者随手刷新一下，刚问出来的酒店列表和刚排好的行程全没了。
+ *
+ * 为什么是 sessionStorage（而不是 localStorage、也不是 Pinia）：
+ * 见 `utils/agentChat.ts` 的模块说明 —— 一句话，它是"这一次访问的对话"，
+ * 不是长期资产，也不该在换人用同一台机器时留给下一个人看。
+ */
+const turns = ref<AgentTurn[]>(loadAgentTurns())
 const question = ref('')
 const streaming = ref(false)
 const composer = ref<HTMLTextAreaElement | null>(null)
 const thread = ref<HTMLElement | null>(null)
 let stopStream: (() => void) | null = null
-let seq = 0
+
+/**
+ * 轮次编号，只用于模板的 `:key`。
+ * 从**已恢复的历史长度**接着往下发号，而不是从 0 开始 ——
+ * 否则新提问会和历史里的某一轮撞 `:key`，Vue 复用错节点，
+ * 表现是"新回答串到了旧问题下面"。
+ * （`loadAgentTurns` 已把历史的 id 重排成 1..N，所以长度就是下一个号。）
+ */
+let seq = turns.value.length
 
 const inSession = computed(() => turns.value.length > 0)
 
@@ -95,6 +146,7 @@ function submit(preset?: string) {
     tool: null,
     cards: [],
     sources: [],
+    itinerary: null,
     cardKind: '',
     elapsedMs: 0,
     streaming: true,
@@ -123,11 +175,16 @@ function submit(preset?: string) {
       }
     },
     onCards: (cards) => {
-      // 两种卡片必须分开存：`knowledge` 走知识库那条路，下发的是**来源**
-      // （名称/出处/链接），其余是高德 POI（地址/距离/电话）。字段几乎不重叠，
-      // 混进同一个数组再在模板里判断，迟早会出现"把来源当酒店渲染"的空白卡。
+      // 三种卡片必须分开存：`knowledge` 走知识库那条路，下发的是**来源**
+      // （名称/出处/链接），`itinerary` 是一份整体行程（哪天去哪几个点），
+      // 其余是高德 POI（地址/距离/电话）。字段几乎不重叠，混进同一个数组
+      // 再在模板里判断，迟早会出现"把来源当酒店渲染"的空白卡。
       if (cards.kind === 'knowledge') {
         turn.sources = cards.items
+      } else if (cards.kind === 'itinerary') {
+        // 行程恒为一张卡。取第一项而不是渲染整个数组 ——
+        // 让"一份行程"这件事在类型上就只有一个，前端不必处理"多份行程"。
+        turn.itinerary = cards.items[0] ?? null
       } else {
         turn.cards = cards.items
       }
@@ -154,6 +211,11 @@ function submit(preset?: string) {
 function finish() {
   streaming.value = false
   stopStream = null
+  // 一轮对话结束时落盘。**刻意不写成 `watch(turns, save, { deep: true })`** ——
+  // 流式回答每来一个 token 都会改 `turn.answer`，那样等于"每吐一个字
+  // 就把整段历史序列化一遍"，几十轮之后会明显卡。
+  // 需要落盘的时刻是有限的几处：这里、卸载时、刷新时、清空时。
+  saveAgentTurns(turns.value)
 }
 
 function stop() {
@@ -186,9 +248,154 @@ function onKeydown(e: KeyboardEvent) {
 function clearAll() {
   if (streaming.value) stop()
   turns.value = []
+  // 必须**显式**清存储：上面那句 `stop()` 里的落盘会把刚清掉的又写回去，
+  // 于是"清空对话 → 刷新"之后旧对话又回来了。
+  clearAgentTurns()
 }
 
-onBeforeUnmount(() => stop())
+/**
+ * 整页刷新 / 关标签页时也要落一次盘。
+ *
+ * **`onBeforeUnmount` 在整页刷新时不会触发** —— 浏览器直接把页面丢掉，
+ * Vue 没有机会跑卸载钩子。少了这一条，"回答还在生成时按 F5"就会丢掉那一轮
+ * （而它恰恰是用户最想找回来的：他想看看刚才答到哪了）。
+ */
+function onPageHide() {
+  saveAgentTurns(turns.value)
+}
+
+onMounted(() => {
+  window.addEventListener('pagehide', onPageHide)
+  // 有历史时**直接贴到底**：用户切回来想看的是最新那一轮。
+  // 这里用硬跳而不是 `scrollTail()` —— 那个函数有"只在已贴底时才滚"的守卫，
+  // 而刚挂载时 scrollTop 是 0，守卫会拦住它，用户看到的是最老的一轮。
+  void nextTick(() => {
+    const el = thread.value
+    if (el) el.scrollTop = el.scrollHeight
+  })
+})
+
+// 卸载时 `stop()` 会顺带落盘一次（它内部调 `finish()`），所以这里不用再写一次。
+onBeforeUnmount(() => {
+  window.removeEventListener('pagehide', onPageHide)
+  stop()
+})
+
+// ---------------------------------------------------------- 当前行程（阶段二）
+
+const session = useSessionStore()
+const router = useRouter()
+
+/** 当前行程与上下文。未登录或读取失败时为 null */
+const trip = ref<TripContext | null>(null)
+/** 正在写上下文（选酒店 / 取消）。避免连点两次发出两个请求 */
+const tripBusy = ref(false)
+/** 一次性提示（"已记住您住在…"）。几秒后自己消失，不占版面 */
+const tripNote = ref('')
+
+/** 已选住处。没选时为 null */
+const selectedHotel = computed(() => trip.value?.hotel ?? null)
+
+/** 预订状态的中文。没有上下文时返回空串，模板据此不渲染那个徽标 */
+const bookingText = computed(() =>
+  trip.value ? (HOTEL_BOOKING_LABEL[trip.value.hotel_booking_status] ?? '') : '',
+)
+
+function isChosen(card: AgentCard) {
+  return selectedHotel.value?.poi_id === card.poi_id
+}
+
+let noteTimer: number | undefined
+function say(text: string) {
+  tripNote.value = text
+  window.clearTimeout(noteTimer)
+  noteTimer = window.setTimeout(() => {
+    tripNote.value = ''
+  }, 6000)
+}
+
+/**
+ * 读当前行程。
+ *
+ * **未登录时一次都不调。** 这是本页最容易踩的坑：`/api/trips/**` 是受保护
+ * 接口，未登录返回 4001，而 http.ts 对受保护路径的 4001 处理是
+ * "清会话 + 跳登录页" —— 一个只是想问问路的游客会被弹走，
+ * 整个助手页对他就不再可用。
+ *
+ * 所以这里先判登录态。没有记忆只是少一个能力，不该把页面本身拿走。
+ */
+async function loadTrip() {
+  if (!session.isLoggedIn) {
+    trip.value = null
+    return
+  }
+  try {
+    trip.value = await getCurrentTrip()
+  } catch {
+    // 读失败（后端没起来 / 令牌刚失效）就当没有上下文。
+    // 不打断对话，也不弹错 —— 助手的主功能是问答，上下文是叠加项。
+    trip.value = null
+  }
+}
+
+onMounted(loadTrip)
+// 登录 / 退出后重新取。用户在另一个标签页登录完切回来也会命中这一条
+watch(() => session.isLoggedIn, loadTrip)
+
+/**
+ * 把这家酒店记为本次行程的住处。
+ *
+ * 只做一件事：写进 TripContext。**不做预订** —— 没有库存、没有支付、
+ * 没有订单，也不调美团/携程的内部接口。"去预订"要到阶段五才有。
+ *
+ * 必须把**经纬度**一起存下去（不能只存名字）：后面那句
+ * "这附近有什么好吃的"就是拿这个坐标去问高德的，只有名字是算不出"附近"的。
+ */
+async function chooseHotel(card: AgentCard) {
+  if (!session.isLoggedIn) {
+    void router.push({ path: '/login', query: { redirect: '/agent' } })
+    return
+  }
+  if (card.lng == null || card.lat == null) {
+    // 极少数 POI 高德不返回坐标。存下去只会让下一轮搜索的中心落空，
+    // 所以在这里拦住并说清楚，而不是存一个没有坐标的"已选酒店"。
+    say('这家酒店高德没有返回坐标，没法作为"附近"的中心，换一家试试。')
+    return
+  }
+  if (tripBusy.value) return
+  tripBusy.value = true
+  try {
+    trip.value = await selectTripHotel({
+      poi_id: card.poi_id,
+      name: card.name,
+      address: card.address,
+      longitude: card.lng,
+      latitude: card.lat,
+      source: card.source,
+    })
+    say(`已记住：您住在「${card.name}」。现在直接问"这附近有什么好吃的"就行。`)
+  } catch (e) {
+    say(e instanceof Error ? e.message : '保存失败，请稍后再试')
+  } finally {
+    tripBusy.value = false
+  }
+}
+
+/** 取消已选住处。只清空酒店，行程本身还在 */
+async function dropHotel() {
+  if (tripBusy.value) return
+  tripBusy.value = true
+  try {
+    trip.value = await clearTripHotel()
+    say('已取消已选住处。')
+  } catch (e) {
+    say(e instanceof Error ? e.message : '取消失败，请稍后再试')
+  } finally {
+    tripBusy.value = false
+  }
+}
+
+onBeforeUnmount(() => window.clearTimeout(noteTimer))
 
 // -------------------------------------------------------------- 卡片渲染
 
@@ -244,6 +451,40 @@ function subline(card: AgentCard): string {
   return parts.join(' · ')
 }
 
+// ---------------------------------------------------------- 行程卡片（阶段三）
+
+/**
+ * 门票。**0 是免费、null 是未知，两者必须分开说** —— 与后端
+ * `tools._price_text` 同一套口径。把 null 显示成"0 元"会让用户以为这个景区不要钱。
+ */
+function ticketText(value: number | string | null): string {
+  if (value === null || value === '') return ''
+  const n = Number(value)
+  if (!Number.isFinite(n)) return `门票 ${value}`
+  return n <= 0 ? '免费' : `¥${n}`
+}
+
+/** 建议时长：分钟 -> "3.5 小时" / "90 分钟"。用户读"210 分钟"要在心里除一遍 */
+function minutesText(m: number): string {
+  if (m <= 0) return ''
+  if (m < 60) return `${m} 分钟`
+  const hours = m / 60
+  return Number.isInteger(hours) ? `${hours} 小时` : `${hours.toFixed(1)} 小时`
+}
+
+/** 级别配色：A 级景区用品牌色，乡村业态（"省级乡村旅游示范村"这类）用中性色 ——
+ *  它们不是"低等级"，只是另一个体系，给成灰色会让用户觉得是次品 */
+function levelClass(level: string): string {
+  return /^[2-5]A$/.test(level) ? 'tag tag-brand' : 'tag'
+}
+
+/** 一天的副标题。合计时长要显示出来：它是"这天装不装得下"的唯一依据 */
+function dayMeta(day: AgentItineraryDay): string {
+  const stops = `${day.stops.length} 个点`
+  const minutes = minutesText(day.minutes)
+  return minutes ? `${stops} · 约 ${minutes}` : stops
+}
+
 const copied = ref('')
 async function copyAddress(card: AgentCard) {
   const text = `${card.name} ${card.address || ''}`.trim()
@@ -290,6 +531,53 @@ async function copyAddress(card: AgentCard) {
     </header>
 
     <div class="container agent__body">
+      <!--
+        ============ 行程上下文条（阶段二）============
+        这一行是"助手记得住"的可见证据：已选住处会一直显示在这里，
+        而它同时也在服务端的 trip_context 里 —— 下一轮问"这附近"时，
+        高德的搜索中心就是它，不需要用户再说一遍。
+
+        未登录时它不是隐藏，而是明说"助手不会记住你的住处"并给登录入口：
+        直接藏起来会让用户以为这个功能不存在。
+      -->
+      <div class="tripbar">
+        <div class="tripbar__l">
+          <span class="tripbar__k">本次行程</span>
+          <template v-if="session.isLoggedIn && trip">
+            <code class="tripbar__code">{{ trip.trip_code }}</code>
+            <span class="tripbar__dest">{{ trip.destination }}</span>
+          </template>
+          <span v-else-if="!session.isLoggedIn" class="tripbar__mute">
+            未登录 · 助手不会记住你的住处
+          </span>
+          <span v-else class="tripbar__mute">正在读取…</span>
+        </div>
+
+        <div class="tripbar__r">
+          <RouterLink
+            v-if="!session.isLoggedIn"
+            class="btn btn-sm btn-line"
+            :to="{ path: '/login', query: { redirect: '/agent' } }"
+          >
+            登录后启用
+          </RouterLink>
+          <template v-else-if="selectedHotel">
+            <span class="tripbar__hotel">
+              住处 <b>{{ selectedHotel.name }}</b>
+              <span v-if="bookingText" class="tripbar__badge">{{ bookingText }}</span>
+            </span>
+            <button class="btn-text" type="button" :disabled="tripBusy" @click="dropHotel">
+              取消住处
+            </button>
+          </template>
+          <span v-else-if="trip" class="tripbar__mute">
+            还没选住处 —— 在高德返回的酒店卡片上点「选择酒店」
+          </span>
+        </div>
+
+        <p v-if="tripNote" class="tripbar__note">{{ tripNote }}</p>
+      </div>
+
       <!-- ============ 空态：引导 + 示例问题 ============ -->
       <section v-if="!inSession" class="intro">
         <div class="intro__how">
@@ -306,6 +594,13 @@ async function copyAddress(card: AgentCard) {
             <li>
               <b>最后组织成人话</b>
               <span>模型只负责把查到的结果说清楚，并指出哪家更近、更适合</span>
+            </li>
+            <li>
+              <b>记住你住哪儿</b>
+              <span>
+                在酒店卡片上点「选择酒店」，之后直接问"这附近有什么好吃的"就行 ——
+                不用再报一次住哪（需登录）
+              </span>
             </li>
           </ol>
         </div>
@@ -362,11 +657,85 @@ async function copyAddress(card: AgentCard) {
               <span class="tstep__icon" />
               <span class="tstep__label">{{ t.tool.label }}</span>
               <span v-if="t.tool.status === 'done' && t.tool.count != null" class="tstep__meta">
-                返回 {{ t.tool.count }} 条
+                <!--
+                  行程工具返回的 count 是**天数**，不是条数。写成"返回 2 条"会让
+                  用户以为只查到两个点。这里按 cardKind 分流：cards 事件在 tool
+                  事件之后到，到了会触发重渲染，所以这一格能跟着改对。
+                -->
+                {{ t.cardKind === 'itinerary' ? `共 ${t.tool.count} 天` : `返回 ${t.tool.count} 条` }}
               </span>
               <span v-else-if="t.tool.status === 'error'" class="tstep__meta tstep__meta--err">
                 {{ t.tool.error || '调用失败' }}
               </span>
+            </div>
+
+            <!--
+              行程卡片：一份按天的方案。
+              与下面的地点卡片是两种东西 —— 它是一份**整体**（哪天去哪几个点），
+              不是一个"可选择的点"，所以这里不逐张渲染、也没有任何按钮。
+            -->
+            <div v-if="t.itinerary" class="itin">
+              <div class="cards__head">
+                <span class="cards__t">{{ t.itinerary.title }}</span>
+                <span class="cards__src">方案由本地数据包排出，非模型生成</span>
+              </div>
+
+              <!--
+                数据包里的点不够时算法会少排。**如实显示**，不把 2 天冒充成 3 天 ——
+                "宁可少排一天，也不重复推荐同一个点"这条规则要能看见。
+              -->
+              <p v-if="t.itinerary.days.length < t.itinerary.requested_days" class="itin__short">
+                您要的是 {{ t.itinerary.requested_days }} 天，数据包里可排的游览点只够
+                {{ t.itinerary.days.length }} 天。
+              </p>
+
+              <ol class="itin__days">
+                <li v-for="d in t.itinerary.days" :key="d.day" class="iday">
+                  <div class="iday__head">
+                    <span class="iday__no">第 {{ d.day }} 天</span>
+                    <span class="iday__district">{{ d.district }}</span>
+                    <span class="iday__meta">{{ dayMeta(d) }}</span>
+                  </div>
+                  <ul class="iday__stops">
+                    <li v-for="(s, i) in d.stops" :key="s.poi_id" class="istop">
+                      <span class="istop__no">{{ i + 1 }}</span>
+                      <div class="istop__main">
+                        <div class="istop__top">
+                          <h4 class="istop__name">{{ s.name }}</h4>
+                          <span v-if="s.level" :class="levelClass(s.level)">{{ s.level }}</span>
+                        </div>
+                        <div class="istop__facts">
+                          <span v-if="s.duration_min" class="istop__fact">
+                            建议游览 {{ minutesText(s.duration_min) }}
+                          </span>
+                          <span v-if="ticketText(s.ticket_price)" class="istop__fact">
+                            {{ ticketText(s.ticket_price) }}
+                          </span>
+                          <span v-if="s.open_hours" class="istop__fact">开放 {{ s.open_hours }}</span>
+                        </div>
+                        <p v-if="s.summary" class="istop__desc">{{ s.summary }}</p>
+                        <div v-if="s.tags.length" class="istop__tags">
+                          <span v-for="tag in s.tags" :key="tag" class="tag">{{ tag }}</span>
+                        </div>
+                      </div>
+                    </li>
+                  </ul>
+                </li>
+              </ol>
+
+              <p v-for="(note, i) in t.itinerary.notes" :key="`itin-note-${i}`" class="itin__note">
+                {{ note }}
+              </p>
+
+              <!--
+                免责说明不是客套：门票与开放时间是数据包里的**静态整理值**，
+                出行前可能已经变了。写出来就必须标注来源与时效性。
+              -->
+              <p class="cards__note">
+                以上名称、级别、建议时长、门票与开放时间来自本地数据包的静态整理值，
+                <b>不是实时信息</b>，出行前请以景区公告为准。本行程只排游览点，
+                不含餐饮、住宿与交通方式；同一天的点按地理位置就近排列。
+              </p>
             </div>
 
             <!-- 卡片：逐字来自高德，不经过模型 -->
@@ -376,7 +745,12 @@ async function copyAddress(card: AgentCard) {
                 <span class="cards__src">数据来源：高德地图</span>
               </div>
               <ul class="cards__list">
-                <li v-for="c in t.cards" :key="c.poi_id" class="hcard">
+                <li
+                  v-for="c in t.cards"
+                  :key="c.poi_id"
+                  class="hcard"
+                  :class="{ 'hcard--chosen': isChosen(c) }"
+                >
                   <div class="hcard__pic">
                     <PoiImage :src="c.photo" :scene="sceneOf(t.cardKind)" ratio="4 / 3" :alt="c.name" />
                   </div>
@@ -417,14 +791,41 @@ async function copyAddress(card: AgentCard) {
                       <button class="btn btn-sm btn-ghost" type="button" @click="copyAddress(c)">
                         {{ copied === c.poi_id ? '已复制' : '复制名称与地址' }}
                       </button>
+
                       <!--
-                        TODO（阶段二）：这里放「选择酒店」，把该 POI 的
-                        {poi_id, name, address, lng, lat, source} 写进 TripContext
-                        的 selected_hotel。**必须存经纬度**，只存名字的话
-                        "我住这儿，附近有什么好吃的" 就无从算起。
-                        TODO（阶段五）：这里放「去预订」，跳到第三方平台，
+                        「选择酒店」只出现在**酒店**卡片上。
+                        类别取自卡片自己的 kind（后端按 typecode 逐张标注），
+                        不是这一批结果的整体类别 —— 混合结果里第一条是餐厅时，
+                        整批都会被判成非酒店，那张酒店卡片就没有按钮了。
+
+                        点它只做一件事：把这家的 poi_id + 名称 + 地址 + **经纬度**
+                        写进本次行程的上下文。**不预订**，本页也不提供预订。
+                        未登录时按钮改成「登录后选择」，点了去登录页而不是直接调接口
+                        （受保护接口的 4001 会触发全局跳登录，那对游客是误伤）。
+                      -->
+                      <template v-if="c.kind === 'hotel'">
+                        <button
+                          v-if="isChosen(c)"
+                          class="btn btn-sm btn-primary hcard__chosen"
+                          type="button"
+                          disabled
+                        >
+                          ✓ 已选为住处
+                        </button>
+                        <button
+                          v-else
+                          class="btn btn-sm btn-line"
+                          type="button"
+                          :disabled="tripBusy"
+                          @click="chooseHotel(c)"
+                        >
+                          {{ session.isLoggedIn ? '选择酒店' : '登录后选择' }}
+                        </button>
+                      </template>
+                      <!--
+                        TODO（阶段五）：这里加「去预订」，跳到第三方平台，
                         同时把 hotel_booking_status 置为 external_pending。
-                        现在不放这两个按钮：它们做不了真事，放上去就是假的。
+                        现在不放：它做不了真事，放上去就是假的。
                       -->
                     </div>
                   </div>
@@ -490,10 +891,22 @@ async function copyAddress(card: AgentCard) {
 
             <!-- 回答正文 -->
             <div v-if="t.answer" class="ans__text">
-              <p v-for="(para, i) in t.answer.split('\n').filter(Boolean)" :key="i">{{ para }}</p>
+              <!--
+                `inlineText` 与知识问答页共用一份（见 utils/format.ts）：
+                先转义 HTML 再把 `**加粗**` 换成 strong。**这是 v-html，
+                所以顺序不能反** —— 先插标签再转义就是一个注入点。
+              -->
+              <p
+                v-for="(para, i) in t.answer.split('\n').filter(Boolean)"
+                :key="i"
+                v-html="inlineText(para)"
+              />
               <span v-if="t.streaming" class="ans__caret" />
             </div>
-            <div v-else-if="t.streaming && !t.cards.length && !t.sources.length" class="ans__waiting">
+            <div
+              v-else-if="t.streaming && !t.cards.length && !t.sources.length && !t.itinerary"
+              class="ans__waiting"
+            >
               <span class="dot" /><span class="dot" /><span class="dot" />
             </div>
 
@@ -616,6 +1029,67 @@ async function copyAddress(card: AgentCard) {
   color: rgba(255, 255, 255, 0.72);
   background: rgba(255, 255, 255, 0.1);
   border-color: rgba(255, 255, 255, 0.2);
+}
+
+/* ---------------- 行程上下文条（阶段二） ---------------- */
+.tripbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-4);
+  flex-wrap: wrap;
+  margin: var(--sp-5) 0 0;
+  padding: 11px var(--sp-4);
+  background: var(--brand-50);
+  border: 1px solid var(--brand-100);
+  border-radius: var(--r-md);
+  font-size: var(--fs-xs);
+}
+.tripbar__l,
+.tripbar__r {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+}
+.tripbar__k {
+  color: var(--ink-500);
+}
+.tripbar__code {
+  font-family: var(--font-num);
+  font-size: var(--fs-xs);
+  color: var(--brand-700);
+  background: #fff;
+  border: 1px solid var(--brand-100);
+  border-radius: var(--r-sm);
+  padding: 1px 7px;
+}
+.tripbar__dest {
+  font-weight: 600;
+  color: var(--ink-900);
+}
+.tripbar__mute {
+  color: var(--ink-500);
+}
+.tripbar__hotel {
+  color: var(--ink-600);
+}
+.tripbar__hotel b {
+  color: var(--brand-700);
+  font-weight: 600;
+}
+.tripbar__badge {
+  margin-left: 6px;
+  padding: 1px 7px;
+  font-size: 11px;
+  color: var(--gold-600);
+  background: var(--gold-50);
+  border-radius: var(--r-pill);
+}
+/* 提示独占一行：它是"刚刚发生了什么"的反馈，与左侧的稳定状态不是一类信息 */
+.tripbar__note {
+  flex-basis: 100%;
+  color: var(--brand-700);
 }
 
 /* ---------------- 主体 ---------------- */
@@ -904,6 +1378,138 @@ async function copyAddress(card: AgentCard) {
   border-top: 1px dashed var(--line);
 }
 
+/* 行程卡片：一份整体方案，所以是**一条时间轴**而不是网格 ——
+   网格会让人以为这些点可以任意挑，而行程的关键恰恰是"哪天去哪几个"。 */
+.itin {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+.itin__short {
+  font-size: var(--fs-cap);
+  line-height: 1.7;
+  color: var(--warn);
+  background: var(--warn-50);
+  border-radius: var(--r-sm);
+  padding: var(--sp-2) var(--sp-3);
+}
+.itin__days {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+.iday {
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: #fff;
+  overflow: hidden;
+}
+.iday__head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-3);
+  flex-wrap: wrap;
+  padding: var(--sp-3) var(--sp-4);
+  background: var(--paper-3);
+  border-bottom: 1px solid var(--line);
+}
+.iday__no {
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--brand-700);
+}
+.iday__district {
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--ink-700);
+}
+.iday__meta {
+  margin-left: auto;
+  font-size: var(--fs-cap);
+  color: var(--warm-400);
+}
+.iday__stops {
+  display: flex;
+  flex-direction: column;
+}
+/* 站点之间用虚线分隔，不各做一个卡片 —— 同一天的点是"一条线上的几站" */
+.istop {
+  display: flex;
+  gap: var(--sp-3);
+  padding: var(--sp-3) var(--sp-4);
+}
+.istop + .istop {
+  border-top: 1px dashed var(--line);
+}
+.istop__no {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--brand-50);
+  color: var(--brand-700);
+  font-size: var(--fs-cap);
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-top: 2px;
+}
+.istop__main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.istop__top {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+}
+.istop__name {
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--ink-700);
+}
+.istop__facts {
+  display: flex;
+  gap: var(--sp-3);
+  flex-wrap: wrap;
+  font-size: var(--fs-cap);
+  color: var(--ink-600);
+}
+.istop__fact {
+  position: relative;
+}
+.istop__fact + .istop__fact::before {
+  content: '·';
+  position: absolute;
+  left: -9px;
+  color: var(--warm-400);
+}
+.istop__desc {
+  font-size: var(--fs-cap);
+  line-height: 1.75;
+  color: var(--warm-500);
+  /* 限行宽：卡片有 1240px 宽，不限的话简介一行能排到 90 多个字，读不动。
+     46em 与知识问答页的正文同一个量度（见 Assistant.vue）。 */
+  max-width: 46em;
+}
+.istop__tags {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.itin__note {
+  font-size: var(--fs-cap);
+  line-height: 1.7;
+  color: var(--warm-500);
+  padding-left: var(--sp-3);
+  border-left: 2px solid var(--line);
+}
+
 /* 来源卡片：比地点卡片轻（它是"依据"，不是"推荐"），一列排下来便于逐条核对 */
 .cards__list--src {
   grid-template-columns: minmax(0, 1fr);
@@ -1002,6 +1608,13 @@ async function copyAddress(card: AgentCard) {
   border-color: var(--brand-300);
   box-shadow: var(--sh-2);
 }
+/* 已选为住处的卡片。用左边框 + 底色，而不是只靠按钮文案 ——
+   用户往上翻历史时要能一眼看出"我选的是哪一家" */
+.hcard--chosen {
+  border-color: var(--brand-300);
+  background: var(--brand-50);
+  box-shadow: inset 3px 0 0 var(--brand-600);
+}
 .hcard__pic {
   flex: none;
   width: 108px;
@@ -1079,8 +1692,17 @@ async function copyAddress(card: AgentCard) {
   text-underline-offset: 3px;
 }
 .hcard__acts {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  flex-wrap: wrap;
   margin-top: auto;
   padding-top: 4px;
+}
+/* 已选中：保持主色但降低不透明度，让"这是状态"与"这是按钮"区分开 */
+.hcard__chosen {
+  opacity: 1;
+  cursor: default;
 }
 
 /* 回答正文 */

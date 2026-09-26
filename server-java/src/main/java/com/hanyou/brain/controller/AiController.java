@@ -5,11 +5,11 @@ import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
-import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -19,8 +19,11 @@ import org.springframework.web.servlet.mvc.method.annotation.StreamingResponseBo
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.hanyou.brain.auth.AuthUser;
+import com.hanyou.brain.common.BodyReader;
 import com.hanyou.brain.common.ErrorCode;
 import com.hanyou.brain.common.Result;
+import com.hanyou.brain.service.TripService;
 import com.hanyou.brain.service.support.AiClient;
 
 import lombok.RequiredArgsConstructor;
@@ -48,6 +51,13 @@ import lombok.extern.slf4j.Slf4j;
  * **不需要再配一次权限**——这里记一笔，免得后来人以为漏配了。
  * 反过来说，这一层**不能放需要登录才能做的动作**（下单、改资料），
  * 那些必须走各自的受保护接口。
+ *
+ * <p><b>M4 阶段二起，{@code /agent} 会带上登录用户的行程上下文。</b>
+ * 上下文由服务端从 {@code trip} / {@code trip_context} 读出来，
+ * 前端传什么都不看（见 {@link AiClient#streamAgent}）。未登录时
+ * {@code me} 为 null，请求体与阶段一完全一致 —— 助手照常工作，只是没有记忆。
+ * 这个"登录是可选的增强"是刻意的：问答的核心价值不依赖登录，
+ * 而"选择酒店"这类写操作走 {@code /api/trips/**}，那条路必须登录。
  */
 @Slf4j
 @RestController
@@ -57,6 +67,7 @@ public class AiController {
 
     private final AiClient aiClient;
     private final ObjectMapper objectMapper;
+    private final TripService tripService;
 
     /** AI 健康状态。字段随 Python 侧演进，这里只做透传，不定义 DTO */
     @GetMapping("/health")
@@ -91,8 +102,9 @@ public class AiController {
      * meta → delta（多条）→ done，任一步出错则发 error。
      */
     @PostMapping(value = "/qa", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
-    public ResponseEntity<StreamingResponseBody> qa(@RequestBody(required = false) Map<String, String> body) {
-        return sse(questionOf(body), aiClient::streamQa);
+    public ResponseEntity<StreamingResponseBody> qa(@RequestBody(required = false) Map<String, Object> body) {
+        String question = questionOf(body);
+        return sse(onLine -> aiClient.streamQa(question, onLine));
     }
 
     /**
@@ -104,15 +116,36 @@ public class AiController {
      * （tools / amap），done 里还多一个 tool。两套语义塞进同一个端点，
      * 前端每处都要判断"这次有没有 tool 字段"，而 M3 已验收的契约也会被改动。
      * 多一个端点的代价，远小于污染一个已验收的协议。
+     *
+     * <p>阶段二起多一步：登录用户会带上他当前行程的上下文（目的地 + 已选酒店 +
+     * 坐标 + 预订状态），于是"这附近有什么好吃的"里的"附近"有了确定指代。
+     * 未登录时 {@code me} 为 null，上下文为空 —— 与阶段一行为完全一致。
      */
     @PostMapping(value = "/agent", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
-    public ResponseEntity<StreamingResponseBody> agent(@RequestBody(required = false) Map<String, String> body) {
-        return sse(questionOf(body), aiClient::streamAgent);
+    public ResponseEntity<StreamingResponseBody> agent(@RequestBody(required = false) Map<String, Object> body,
+                                                      @AuthenticationPrincipal AuthUser me) {
+        String question = questionOf(body);
+        // 读库放在建 SSE 响应之前：这样"读上下文失败"还能报成正常的 Result 错误，
+        // 而不是在一个已经开始写的流里发 error 事件（那时状态码已经发出去了）
+        Map<String, Object> context = me == null ? Map.of() : tripService.aiContext(me.userId());
+        return sse(onLine -> aiClient.streamAgent(question, context, onLine));
     }
 
-    /** 取问题。body 允许缺省（前端探活时会发空体），此时按空串走 */
-    private static String questionOf(Map<String, String> body) {
-        return body == null ? "" : body.getOrDefault("question", "");
+    /**
+     * 取问题。body 允许缺省（前端探活时会发空体），此时按空串走。
+     *
+     * <p>请求体声明成 {@code Map<String, Object>} 而不是 {@code Map<String, String>}：
+     * 后者只要客户端多传一个非字符串字段（把整个对象回传、或传一个数组），
+     * Jackson 就抛 {@code HttpMessageNotReadableException}，落到兜底分支报
+     * 9000「服务内部错误」——而问题其实在客户端。用 Object 接住、只取
+     * 自己认识的键，多传什么都不影响。与 M6 起沿用同一套做法。
+     */
+    private static String questionOf(Map<String, Object> body) {
+        if (body == null) {
+            return "";
+        }
+        String question = BodyReader.str(body, "question");
+        return question == null ? "" : question;
     }
 
     /**
@@ -122,17 +155,20 @@ public class AiController {
      * 如果各写一份，改了一处（比如忘了 {@code X-Accel-Buffering}）就会有一个端点
      * 在反代后面变成"最后一次性出现"，而这种差异极难发现。
      *
-     * @param question 用户问题
-     * @param upstream 上游调用，签名与 {@link AiClient#streamQa} 一致
+     * <p>参数是"给我一个行接收器，我去把上游接上"的函数，而不是
+     * {@code (question, onLine)} 二元组：agent 比 qa 多一个上下文参数，
+     * 用二元组就得为它单独开一个三参数重载，两个端点的帧格式立刻有了
+     * 两份实现。让调用方闭包捕获自己的参数，这里就只认"行接收器"一件事。
+     *
+     * @param upstream 接上游的动作，拿到行接收器后自行发起请求
      */
-    private ResponseEntity<StreamingResponseBody> sse(
-            String question, BiConsumer<String, Consumer<String>> upstream) {
+    private ResponseEntity<StreamingResponseBody> sse(Consumer<Consumer<String>> upstream) {
         StreamingResponseBody stream = output -> {
             if (!aiClient.isEnabled()) {
                 writeEvent(output, "data: {\"type\":\"error\",\"message\":\"AI 能力未启用\"}\n\n");
                 return;
             }
-            upstream.accept(question, line -> writeEvent(output, line + "\n"));
+            upstream.accept(line -> writeEvent(output, line + "\n"));
         };
 
         return ResponseEntity.ok()

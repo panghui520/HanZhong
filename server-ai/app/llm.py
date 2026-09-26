@@ -44,7 +44,7 @@ import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, AsyncIterator, Sequence
+from typing import Any, AsyncIterator, Mapping, Sequence
 
 import httpx
 
@@ -114,7 +114,8 @@ SYSTEM_PROMPT_GENERAL = """你是「汉游智脑」的助手 —— 一个面向
 # ----------------------------------------------------------------------
 
 SYSTEM_PROMPT_TOOLS = """你是「汉游智脑」的 AI 旅游助手，服务对象是准备到陕西{city}旅游的游客。
-本次回答附有**工具返回的真实数据**（地点信息来自高德地图），这些数据是可靠的。
+本次回答附有**工具返回的真实数据**，这些数据是可靠的：
+地点类来自高德地图，行程方案类来自{city}本地数据包。
 
 回答规则：
 1. **只依据【工具结果】里出现过的地点、距离、地址、电话来推荐。**
@@ -124,15 +125,37 @@ SYSTEM_PROMPT_TOOLS = """你是「汉游智脑」的 AI 旅游助手，服务对
    提醒用户哪些字段（电话、营业时间）需要自行核实。
 3. 不可以做的：编造评分、编造「步行 8 分钟」、编造「离车站只有 500 米」、
    编造营业时间或房型价格。距离**只引用工具给出的米数**。
+   搜索半径同理：工具里写「半径 2000 米」，就说 2000 米或 2 公里，
+   不要换成别的数字。凡是要写数字，先在【工具结果】里找到它；找不到就不要写。
 4. 工具结果为空时，直接说明这个位置附近没有查到该类地点，不要拿别的数据凑数。
 5. 用简体中文，简洁分点，用自己的话组织，不要整段照抄工具结果。
+   **回答会按纯文本段落显示**（一行 = 一段）：不要用 `#` / `##` 标题，
+   不要用 `-` / `*` 列表符号（用「1. 2. 3.」或直接分行）；需要强调某个名字时
+   用 `**加粗**`。写成 Markdown 标题会原样显示成一串井号。
 6. 不要写「根据工具结果1」这类引用标记，卡片由系统单独展示。
 7. 本系统只做**推荐**，不做预订。不要承诺能帮用户订房、订座或付款，
    **也不要描述界面上有「预订」按钮或跳转链接** —— 这一版没有这些按钮，
    说了用户会去找一个不存在的东西。要订房时，说明需要他自己到第三方平台预订。
 8. 如果工具结果的说明里指出**搜索中心被替换过**（例如"没能定位到 X，已改用
    市区中心"），必须在回答开头如实说明这一点，再给结果。用户问的是 X 附近，
-   答的是别处附近，不说明就等于答错了问题。"""
+   答的是别处附近，不说明就等于答错了问题。
+9. 上面给了「用户当前行程」时，可以自然地用上它（例如"您住的 XX 酒店附近…"），
+   让回答接得上之前的对话。但**不要复述坐标数字**，也不要在与行程无关的
+   回答里硬扯上住处 —— 那只会显得啰嗦。
+
+【工具结果是「行程方案」时，额外遵守这几条】
+10. **按它给的天数和区县原样呈现**：第几天在哪个区县、那天有哪几个点，
+    一个不少、一个不多。不要自己加景点、不要减、不要改天数、
+    不要把不同天的点互换 —— 这份方案是按"同一天只在同一个区县"排出来的，
+    你一改就破坏了它唯一的保证。
+11. 门票与开放时间是**数据包里的静态整理值，不是实时信息**。写出来的时候
+    必须带上"以景区公告为准"这类提醒，不要说成当前价格或当前时间。
+12. **不要编造交通方式、车程、里程或路线**。方案里只给了"哪一天在哪个区县"，
+    没有给怎么走。用户问"怎么过去"时，说明需要他自行用地图导航查询。
+13. 方案里**不含餐饮与住宿**，这是有意的。不要替用户补上"中午在 XX 吃"这类安排；
+    他想找吃的、找住处，你可以告诉他换个问法（问某个地方附近有什么）。
+14. 用户要的天数多于方案排出来的天数时（方案说明里会写），
+    **如实说明"数据包里只够排 N 天"**，不要硬凑、也不要重复推荐同一个点。"""
 
 ROUTER_PROMPT = """你是「汉游智脑」的**工具调度器**。你的唯一任务是判断用户这一句话
 需要调用哪个工具，**不要回答用户的问题**。
@@ -140,14 +163,22 @@ ROUTER_PROMPT = """你是「汉游智脑」的**工具调度器**。你的唯一
 可用工具：
 {tool_menu}
 
+{trip_context}
+
 判断规则（按顺序看）：
 1. 问「某地附近 / 周围有什么酒店、餐厅、景点」这类**以某个地点为中心**的搜索
    → `search_nearby`
 2. 问**某个具体地点本身**的位置或信息（「汉中博物馆在哪」「汉中高铁站在哪」）
    → `search_poi`
-3. 问{city}的历史、文化、气候、物产、特产知识，或问数据包里某处资源点、
+3. 问**具体几天的行程方案**（「两日游怎么安排」「汉中三天怎么玩」
+   「帮我排一个两天行程」「周末去汉中怎么安排」）→ `plan_itinerary`
+   **这一条最容易和下面的知识库搞混，看清区别**：
+   要的是"一份具体方案"（哪天去哪几个点）→ 这里；
+   要的是"排行程的方法、原则、注意事项"（「行程一般怎么安排比较好」
+   「一天排几个景点合适」「汉中旅游有什么要注意的」）→ 走第 4 条的 `knowledge_search`。
+4. 问{city}的历史、文化、气候、物产、特产知识，或问数据包里某处资源点、
    某项体验、某款产品的介绍 → `knowledge_search`
-4. 与{city}无关（问助手自身、通用概念、闲聊），或只是打招呼 → `none`
+5. 与{city}无关（问助手自身、通用概念、闲聊），或只是打招呼 → `none`
 
 只输出**一行 JSON**，不要解释、不要 Markdown 代码块、不要多余文字：
 
@@ -156,17 +187,79 @@ ROUTER_PROMPT = """你是「汉游智脑」的**工具调度器**。你的唯一
 各工具的 args 写法：
 - `search_nearby`：{"center": "中心点的地点名", "keyword": "关键词，如 酒店 / 餐厅", "types": "类型编码", "radius": 半径米数}
 - `search_poi`：{"keywords": "要查的地点名", "types": "类型编码，可省略"}
+- `plan_itinerary`：{"days": 天数（整数，如 2）, "preference": "偏好，可省略（如 自然风光 / 历史文化 / 亲子）"}
 - `knowledge_search`：{"query": "用户问题的核心问法"}
 - `none`：{}
 
 三条硬性约束：
 - **一次只选一个工具。**
-- **不要编造地点名**。用户没提到的地点不要自己补；用户说「附近」但没说在哪附近时，
-  把 `center` 写成空字符串，系统会用城市中心兜底。
+- **不要编造地点名**。用户没提到的地点不要自己补。
+  用户说「附近 / 周围」但**没有指明具体地点**时，把 `center` 写成**空字符串** ——
+  系统会用他本次行程已选定的住处作为中心（没有已选住处时才用城市中心）。
+  你自己填一个酒店名或城市名，反而会把更准确的那个中心覆盖掉。
 - `types` 只能用上面工具清单里给出的编码，不要自己发明。
+- `plan_itinerary` 的 `days` **只能从用户的话里读**（"两天/三日/三天/周末"），
+  读不出来就把 `days` 留空（系统按 2 天处理），**不要自己替用户决定玩几天**。
 
 （注意：上面 JSON 示例里的花括号是**字面量**，不是占位符。本提示词由 `_fill()`
 逐键替换，不走 `str.format`，所以不需要写双花括号。）"""
+
+# 预订状态 -> 给模型看的中文。**只描述事实，不描述能力** ——
+# 本系统不代办预订（规则 7），这里写"未预订"就够了，不要写成"可以帮您预订"。
+_BOOKING_LABEL = {
+    "not_booked": "未预订",
+    "external_pending": "已跳转到第三方平台，尚未确认",
+    "booked": "已预订",
+    "cancelled": "已取消",
+}
+
+
+def trip_context_text(context: "Mapping[str, Any] | None") -> str:
+    """把行程上下文渲染成提示词里的一段中文。没有上下文时返回空串。
+
+    **只渲染这一轮真的用得上的两件事**：目的地、已选住处（含坐标）。
+    上下文里多一个字段就多一行提示词，而模型的注意力是有限的 ——
+    把行程编号、创建时间这类东西塞进去，只会稀释"用户住哪"这个关键信息。
+
+    坐标要写进来，是因为模型需要用它在回答里判断"哪几家更近"（工具结果里
+    有距离米数）；但它被规则 9 要求**不要复述**，所以这不是给用户看的。
+
+    抽成一个函数而不是在 agent.py 里拼字符串：调度器与生成阶段读的必须是
+    同一段文字，否则会出现"调度器知道用户住在哪、生成阶段不知道"这种
+    只在多轮对话里才暴露的不一致。
+
+    **不是字典就当作没有上下文**，而不是抛异常。它来自 HTTP 请求体，
+    上游已经挡过一道（见 `main._body_of` 与 `AgentService.stream`），
+    但这里再挡一次几乎不花钱：万一以后多一条调用路径忘了挡，
+    后果会是"整轮对话 500"，而上下文本来只是个增强项。
+    """
+    if not isinstance(context, Mapping) or not context:
+        return ""
+
+    lines: list[str] = []
+    destination = str(context.get("destination") or "").strip()
+    if destination:
+        lines.append(f"- 本次行程目的地：{destination}")
+
+    hotel = context.get("selected_hotel")
+    if isinstance(hotel, Mapping):
+        name = str(hotel.get("name") or "").strip()
+        if name:
+            address = str(hotel.get("address") or "").strip()
+            location = str(hotel.get("location") or "").strip()
+            line = f"- 已选住处：{name}"
+            if address:
+                line += f"（{address}）"
+            if location:
+                line += f"，坐标 {location}"
+            lines.append(line)
+            status = str(context.get("hotel_booking_status") or "").strip()
+            if status:
+                lines.append(f"- 住处预订状态：{_BOOKING_LABEL.get(status, status)}")
+
+    if not lines:
+        return ""
+    return "用户当前行程：\n" + "\n".join(lines)
 
 
 def _fill(template: str, **values: str) -> str:
@@ -228,11 +321,30 @@ def build_messages(
 
 
 def build_router_messages(
-    question: str, tool_menu: str, *, city: str = "汉中"
+    question: str,
+    tool_menu: str,
+    *,
+    city: str = "汉中",
+    context: Mapping[str, Any] | None = None,
 ) -> list[dict[str, str]]:
-    """工具调度器的消息。它**不回答**问题，只输出一行 JSON 决定用哪个工具。"""
+    """工具调度器的消息。它**不回答**问题，只输出一行 JSON 决定用哪个工具。
+
+    `context` 是本次行程上下文（M4 阶段二）。调度器需要它，是因为
+    "用户说「附近」但没说在哪附近"这条规则必须有确定的落点：
+    没有上下文时系统用城市中心兜底，有已选酒店时用酒店兜底。
+    把上下文给调度器，它才敢把 `center` 留空 —— 否则它会自己编一个
+    "汉中市区"填进去，把更准确的那个中心覆盖掉。
+    """
+    block = trip_context_text(context) or "（本次没有行程上下文：用户未登录，或尚未选择住处）"
+    # trip_context 放最后传：它的内容来自数据库（酒店名可能含花括号），
+    # 最后替换就不会被后面的键再扫一遍
     return [
-        {"role": "system", "content": _fill(ROUTER_PROMPT, city=city, tool_menu=tool_menu)},
+        {
+            "role": "system",
+            "content": _fill(
+                ROUTER_PROMPT, city=city, tool_menu=tool_menu, trip_context=block
+            ),
+        },
         {"role": "user", "content": question},
     ]
 
@@ -243,6 +355,7 @@ def build_tool_messages(
     *,
     city: str = "汉中",
     note: str = "",
+    context: Mapping[str, Any] | None = None,
 ) -> list[dict[str, str]]:
     """把工具结果作为【工具结果】交给模型，由它组织成人话。
 
@@ -251,8 +364,17 @@ def build_tool_messages(
 
     `note` 用于追加一句本次的边界说明（例如"高德未配置""只取到 3 条"）。
     放在 system 而不是 user，是因为它约束的是模型的行为而不是内容。
+
+    `context` 是本次行程上下文（M4 阶段二）。**只在这里加，不加进
+    `build_messages`（M3 那条路）**：走知识库的问题是"汉中仙毫是什么茶"
+    这类事实问题，答案与用户住哪无关，把行程塞进去只会让它多扯一句废话；
+    而 M3 的提示词是已验收的，为一件用不上的事去改它不划算。
+    真需要接上下文的是"附近 / 帮我安排"这类问题，它们都走这条路。
     """
     system = _fill(SYSTEM_PROMPT_TOOLS, city=city)
+    block = trip_context_text(context)
+    if block:
+        system = f"{system}\n\n{block}"
     if note:
         system = f"{system}\n\n补充说明：{note}"
     return [

@@ -11,11 +11,14 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.function.Consumer;
 
 import org.springframework.stereotype.Component;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.hanyou.brain.config.HanYouProperties;
@@ -129,7 +132,7 @@ public class AiClient {
      * @param onLine    每读到一行 SSE 就回调一次（不含换行符）
      */
     public void streamQa(String question, Consumer<String> onLine) {
-        streamQuestion("/ai/qa", question, onLine);
+        streamQuestion("/ai/qa", question, null, onLine);
     }
 
     /**
@@ -141,15 +144,23 @@ public class AiClient {
      * 两套并行的转发代码迟早在超时或错误处理上分叉。
      *
      * <p>为什么不把 Agent 塞进 {@code /ai/qa}：见 {@code AiController} 的类注释。
+     *
+     * @param question 用户问题
+     * @param context  本次行程的上下文（M4 阶段二）。空 Map 表示"没有上下文"，
+     *                 此时请求体与阶段一完全一致 —— 未登录用户走的就是这条路。
+     *                 上下文由服务端从库里读出来，**不接受前端传入**：
+     *                 否则任何人都能伪造"我住在某某酒店"去影响检索结果。
+     * @param onLine   每读到一行 SSE 就回调一次（不含换行符）
      */
-    public void streamAgent(String question, Consumer<String> onLine) {
-        streamQuestion("/ai/agent", question, onLine);
+    public void streamAgent(String question, Map<String, Object> context, Consumer<String> onLine) {
+        streamQuestion("/ai/agent", question, context, onLine);
     }
 
-    /** 两个流式端点的共同实现：POST 一个问题，逐行回吐 SSE */
-    private void streamQuestion(String path, String question, Consumer<String> onLine) {
+    /** 两个流式端点的共同实现：POST 一个问题（可选带上下文），逐行回吐 SSE */
+    private void streamQuestion(String path, String question, Map<String, Object> context,
+                                Consumer<String> onLine) {
         HanYouProperties.Ai ai = properties.getAi();
-        String payload = "{\"question\":\"" + escapeJson(question) + "\"}";
+        String payload = buildPayload(question, context);
 
         HttpRequest request = baseRequest(path)
                 .header("Content-Type", "application/json; charset=utf-8")
@@ -188,6 +199,33 @@ public class AiClient {
                 .uri(URI.create(ai.getBaseUrl() + path))
                 .header("X-Internal-Token", ai.getInternalToken())
                 .header("Accept", "text/event-stream");
+    }
+
+    /**
+     * 组装请求体。没有上下文时退化成与阶段一完全相同的 {@code {"question": "..."}}。
+     *
+     * <p>有上下文时改用 Jackson 序列化，而不是继续手拼字符串：上下文是嵌套结构
+     * （{@code selected_hotel.location} 是"经度,纬度"，里面有逗号），
+     * 手拼要自己保证每一层都转义正确，而这里一旦拼坏，Python 侧收到的是
+     * 400 或者更糟的"字段静默消失"。{@link #escapeJson} 保留给降级分支与
+     * SSE 事件用——那些地方只有一个字符串要转义，不值得引入序列化。
+     *
+     * <p>序列化失败时**退化为不带上下文**继续提问，而不是让整次对话失败：
+     * 上下文是增强项，缺了它助手只是变回阶段一的样子，仍然能回答。
+     */
+    private String buildPayload(String question, Map<String, Object> context) {
+        if (context == null || context.isEmpty()) {
+            return "{\"question\":\"" + escapeJson(question) + "\"}";
+        }
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("question", question);
+        body.put("context", context);
+        try {
+            return objectMapper.writeValueAsString(body);
+        } catch (JsonProcessingException e) {
+            log.warn("[AI] 上下文序列化失败，本次退化为不带上下文提问：{}", e.getMessage());
+            return "{\"question\":\"" + escapeJson(question) + "\"}";
+        }
     }
 
     /** 组装一行 SSE error 事件，格式与 Python 侧完全一致 */
