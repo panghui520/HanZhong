@@ -9,10 +9,25 @@
 
 2. **数据包派生**（pois / experiences / products）
    每个资源点、体验、产品各生成一段。好处是知识库跟着数据走：改了数据包、
-   重建一次知识库，两者不会各说各话。体验与产品在数据包里没有 source_url，
-   按规则**继承所属资源点的来源**——它们的公开信息本来就来自同一个官方页面。
+   重建一次知识库，两者不会各说各话。这三类的来源**各自不同**，见下面
+   「来源分三档」一段 —— 曾经让体验与产品继承所属资源点的 source_url，
+   那会让一段自撰描述挂着文旅局的引用，是编造出处，已改掉。
 
 切片按段落聚合到 500 字、相邻切片重叠 50 字，避免答案正好被切在边界上。
+
+**来源分三档**（`source_kind`，随元数据一路传到前端的来源卡片）：
+
+- `detail` —— 8 篇手写文档，front-matter 里各自带真实深链，可点开核对
+- `site`   —— 42 个资源点，只有站点级参考。数据包里的 source_url 全是
+  `http://wl.hanzhong.gov.cn/`，而那是文旅局的**新闻/公告门户**，
+  站上并没有"汉中热面皮（老字号）"这类独立页面。如实标 site，
+  前端显示"站点参考"，而不是把它当成这一条的出处
+- `dataset` —— 14 项体验 + 16 款产品，描述文本由本项目编写，
+  数据包里连 source_url 都没有，所以署"汉游智脑数据包"，
+  前端给的是跳回所属资源点的**站内链接**，而不是一个假外链
+
+**为什么坚持这样分**：来源的全部价值是可核对。一条点进去找不到对应内容的
+链接，比明说"只有站点级参考"更糟 —— 它让不可核对的东西看起来可核对。
 """
 
 from __future__ import annotations
@@ -46,6 +61,48 @@ EXPERIENCE_LABEL = {
     "NATURE": "自然观察",
 }
 
+# ----------------------------------------------------------------------
+# 来源的性质。前端据此决定显示哪种标签、给不给外链。
+#
+# 为什么要把"来源"分成三档而不是只给一个 URL：数据包里 72 篇派生文档
+# 全部指向文旅局站点首页，如果一律当成"这一条的出处"展示，用户点进去
+# 会发现找不到那家店、那个价格 —— 那是**看起来可核对、实际不可核对**，
+# 比明说"只有站点级参考"更糟。三档把这件事讲清楚：
+#
+#   detail  —— 有可核对的具体页面（8 篇手写文档，各自带真实深链）
+#   site    —— 只有站点级参考：该站是新闻/公告门户，不提供这一条的独立页面
+#   dataset —— 项目数据包自有，外部没有对应出处
+# ----------------------------------------------------------------------
+SOURCE_DETAIL = "detail"
+SOURCE_SITE = "site"
+SOURCE_DATASET = "dataset"
+
+# 数据包派生内容的署名。体验与产品的描述文本（desc / story）由本项目编写，
+# 不是从某个官方页面摘的，所以不能挂到文旅局名下 —— 那会是一处**编造的引用**，
+# 而来源的全部意义就是可核对。
+DATASET_SOURCE_NAME = "汉游智脑数据包"
+
+# 来源卡片的介绍长度。太长会把卡片撑开、挤掉标题与链接
+SNIPPET_LIMIT = 80
+
+
+def _snippet(text: str, limit: int = SNIPPET_LIMIT) -> str:
+    """给来源卡片用的简短介绍：去 Markdown 标题、压平空白、按字符截断。
+
+    刻意在**构建期**算好写进元数据，而不是查询期从命中正文里现截：
+    文档结构是这里生成的，只有这里知道哪一段是正文、哪一段是模板套话。
+    放到查询期就得靠正则猜"哪句是套话"，猜错会直接影响用户看到的介绍。
+    """
+    body = re.sub(r"^#{1,6}.*$", "", text, flags=re.MULTILINE)
+    # 顺手去掉行首的列表记号（`- ` / `1. `）。正文里到处是分点，
+    # 压平空白后会变成"……平坝。 - 北面与宝鸡市……"，看着像没处理干净。
+    body = re.sub(r"^[ \t]*[-*+]\s+", "", body, flags=re.MULTILINE)
+    body = re.sub(r"^[ \t]*\d+[.)]\s+", "", body, flags=re.MULTILINE)
+    body = re.sub(r"\s+", " ", body).strip()
+    if len(body) <= limit:
+        return body
+    return body[:limit].rstrip() + "…"
+
 
 @dataclass
 class Doc:
@@ -58,6 +115,8 @@ class Doc:
     source_url: str = ""
     source_name: str = ""
     data_origin: str = "PUBLIC"
+    source_kind: str = SOURCE_DETAIL
+    snippet: str = ""
     extra: dict = field(default_factory=dict)
 
 
@@ -74,6 +133,8 @@ class Chunk:
     source_name: str
     data_origin: str
     seq: int
+    source_kind: str = SOURCE_DETAIL
+    snippet: str = ""
     extra: dict = field(default_factory=dict)
 
 
@@ -118,6 +179,11 @@ def load_hand_docs(docs_dir: Path) -> list[Doc]:
                 source_url=meta.get("source_url", ""),
                 source_name=meta.get("source_name", ""),
                 data_origin=meta.get("data_origin", "PUBLIC"),
+                # 手写文档默认按"有具体页面"处理：它们各自的 front-matter 里
+                # 带真实深链（政府概况页 / 百度百科词条），可核对。
+                # front-matter 也可以显式覆盖，留给以后接入无深链的资料。
+                source_kind=meta.get("source_kind", SOURCE_DETAIL),
+                snippet=_snippet(body),
                 extra={"file": path.name},
             )
         )
@@ -176,6 +242,14 @@ def load_generated_docs(city_dir: Path) -> list[Doc]:
                 source_url=poi.get("source_url", ""),
                 source_name="汉中市文化和旅游局",
                 data_origin=poi.get("data_origin", "PUBLIC"),
+                # 站点级参考：数据包里 42 个资源点的 source_url 全是
+                # http://wl.hanzhong.gov.cn/ —— 那是文旅局的新闻/公告门户，
+                # 站上并没有"汉中热面皮（老字号）"这种独立页面。
+                # 标成 site，前端会显示"站点参考"而不是假装这是该条的出处。
+                source_kind=SOURCE_SITE,
+                # 简介直接取数据包里的 summary：它就是为这一条写的一句话，
+                # 比从拼装正文里截前 80 字准确（正文开头是"X位于汉中市Y…"的套话）
+                snippet=poi.get("summary") or _snippet("\n".join(x for x in lines if x)),
                 extra={
                     "poi_id": poi["id"],
                     "business_type": poi.get("business_type", ""),
@@ -213,10 +287,15 @@ def load_generated_docs(city_dir: Path) -> list[Doc]:
                 title=exp["name"],
                 text="\n".join(x for x in lines if x),
                 doc_type="experience",
-                # 体验在数据包里没有 source_url，继承所属乡村点的来源
-                source_url=parent.get("source_url", ""),
-                source_name="汉中市文化和旅游局",
+                # 不再继承所属乡村点的 source_url。体验的 desc 是本项目编写的
+                # 描述文本，数据包里也没有它自己的 source_url —— 挂到文旅局名下
+                # 等于给一段自撰文字配一个查不到的引用。宁可如实说"数据包自有"，
+                # 站内再给一个跳回该资源点的链接（前端用 poi_id 拼）。
+                source_url="",
+                source_name=DATASET_SOURCE_NAME,
                 data_origin=exp.get("data_origin", "PUBLIC"),
+                source_kind=SOURCE_DATASET,
+                snippet=exp.get("desc") or _snippet("\n".join(x for x in lines if x)),
                 extra={
                     "experience_id": exp["id"],
                     "poi_id": exp.get("poi_id", ""),
@@ -253,9 +332,12 @@ def load_generated_docs(city_dir: Path) -> list[Doc]:
                 title=prod["name"],
                 text="\n".join(x for x in lines if x),
                 doc_type="product",
-                source_url=parent.get("source_url", ""),
-                source_name="汉中市文化和旅游局",
+                # 同体验：story 是本项目编写的产品叙事，数据包里没有 source_url
+                source_url="",
+                source_name=DATASET_SOURCE_NAME,
                 data_origin=prod.get("data_origin", "PUBLIC"),
+                source_kind=SOURCE_DATASET,
+                snippet=prod.get("story") or _snippet("\n".join(x for x in lines if x)),
                 extra={
                     "product_id": prod["id"],
                     "poi_id": prod.get("poi_id", ""),
@@ -334,6 +416,10 @@ def chunk_docs(docs: list[Doc]) -> list[Chunk]:
                     source_name=doc.source_name,
                     data_origin=doc.data_origin,
                     seq=seq,
+                    # 来源性质与简介是**文档级**的，不是切片级：来源卡片代表
+                    # 一篇文档，所以同一文档的每个切片带同一份简介。
+                    source_kind=doc.source_kind,
+                    snippet=doc.snippet,
                     extra=doc.extra,
                 )
             )

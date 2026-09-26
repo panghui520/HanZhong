@@ -153,13 +153,41 @@ export const QA_MODE_LABEL: Record<QaMode, string> = {
   no_answer: '知识库未覆盖',
 }
 
-/** 回答引用的来源。source_url 指向公开出处，可点开核对 */
+/**
+ * 来源性质。决定来源卡片给什么标签、给不给外链：
+ *   detail  —— 有可核对的具体页面（8 篇手写文档，front-matter 里带真实深链）
+ *   site    —— 只有站点级参考：该站不提供这一条的独立页面
+ *   dataset —— 项目数据包自有，外部没有对应出处
+ *
+ * 分三档是因为"看起来可核对、实际不可核对"比明说没有出处更糟：
+ * 一条点进去找不到对应内容的链接，会让用户以为自己的核对已经做过了。
+ */
+export type QaSourceKind = 'detail' | 'site' | 'dataset'
+
+export const QA_SOURCE_KIND_LABEL: Record<QaSourceKind, string> = {
+  detail: '原文可查',
+  site: '站点参考',
+  dataset: '数据包自有',
+}
+
+/**
+ * 回答引用的来源。
+ *
+ * **全部字段都来自知识库元数据，没有任何一处由模型生成** ——
+ * 模型只组织答案正文，网址一旦交给它写就有编造的可能，而来源的全部意义是核对。
+ */
 export interface QaSource {
   title: string
   /** city_doc / poi / experience / product，用于分组显示 */
   doc_type: string
+  /** 简短介绍。构建期从文档里抽好，可能为空 */
+  snippet: string
   source_name: string
+  /** 外部出处链接。dataset 档为空 —— 那时给的是站内链接 */
   source_url: string
+  source_kind: QaSourceKind
+  /** 站内跳转用：拼成 `/poi/{poi_id}`。city_doc 没有（那类只有外链） */
+  poi_id: string
   /** 相关度 0—1；缓存模式下为 null（不经过检索） */
   score: number | null
 }

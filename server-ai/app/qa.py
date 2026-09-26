@@ -8,7 +8,16 @@
     {"type":"done",  "mode":"llm", "elapsed_ms":812}
     {"type":"error", "message":"..."}
 
-先发 meta 再发 delta 是有意的：前端拿到 meta 就能立刻渲染来源角标与模式提示，
+`sources[]` 每一项（前端据此渲染来源卡片）：
+
+    {"title":"汉中热面皮（老字号）", "doc_type":"poi",
+     "snippet":"汉中标志性早餐，米浆蒸制后切条拌辣子，配菜豆腐是本地标准吃法。",
+     "source_name":"汉中市文化和旅游局", "source_url":"http://wl.hanzhong.gov.cn/",
+     "source_kind":"site", "poi_id":"P-FOOD-001", "score":0.42}
+
+**这些字段全部来自知识库元数据，模型只负责正文。** 见 `_source_payload`。
+
+先发 meta 再发 delta 是有意的：前端拿到 meta 就能立刻渲染来源卡片与模式提示，
 不用等正文结束。用户在看到"正在生成"的同时就知道这次回答有没有出处。
 
 **"知识库里没有"是怎么判定的**：不用相似度阈值。
@@ -35,6 +44,34 @@ from .store import Hit, KbStore
 MAX_SOURCES = 5
 
 
+def _source_payload(meta: dict[str, Any], score: float | None) -> dict[str, Any]:
+    """一条来源卡片的数据。
+
+    **所有字段都取自知识库元数据，没有一处由模型生成。** 这是 M3 的硬约束：
+    模型只负责组织答案正文；来源（名称、链接、性质）必须来自检索到的切片元数据。
+    否则模型可能编出一个看起来很像的网址，而"可追溯"就成了空话 ——
+    本项目里来源的全部价值就是可核对。
+
+    - `source_kind`：detail（有具体页面）/ site（只有站点级参考）/ dataset（数据包自有）。
+      前端据此决定标签文案与是否给外链。缺失时按 site 处理：宁可少说一句"原文可查"，
+      也不要把一份真实出处标成"没有出处"。
+    - `poi_id`：拼站内链接用。资源点、体验、产品三类文档都带它
+      （体验与产品记的是挂靠的资源点），所以点一下就能跳到 `/poi/{poi_id}`
+      看完整内容 —— 这是"数据包自有"那两档唯一能给的**真链接**。
+    - `snippet`：构建期算好的简短介绍，允许为空（前端少一行，不报错）。
+    """
+    return {
+        "title": meta.get("title", ""),
+        "doc_type": meta.get("doc_type", ""),
+        "source_name": meta.get("source_name", ""),
+        "source_url": meta.get("source_url", ""),
+        "source_kind": meta.get("source_kind", "site"),
+        "snippet": meta.get("snippet", ""),
+        "poi_id": meta.get("poi_id", ""),
+        "score": None if score is None else round(score, 4),
+    }
+
+
 def _sources_from_hits(hits: Sequence[Hit]) -> list[dict[str, Any]]:
     """把命中转成前端要的来源列表。
 
@@ -43,16 +80,7 @@ def _sources_from_hits(hits: Sequence[Hit]) -> list[dict[str, Any]]:
     前端只用它展示首条相关度（`meta.top_score`），不逐条展示；保留它是为了排查时
     能看到每条来源各自的词法相关度。
     """
-    return [
-        {
-            "title": h.metadata.get("title", ""),
-            "doc_type": h.metadata.get("doc_type", ""),
-            "source_name": h.metadata.get("source_name", ""),
-            "source_url": h.metadata.get("source_url", ""),
-            "score": round(h.score, 4),
-        }
-        for h in hits[:MAX_SOURCES]
-    ]
+    return [_source_payload(h.metadata, h.score) for h in hits[:MAX_SOURCES]]
 
 
 class QaService:
@@ -145,17 +173,10 @@ class QaService:
 
     def _resolve_sources(self, mode: str, cached, hits: Sequence[Hit]) -> list[dict[str, Any]]:
         if mode == "cache" and cached is not None:
+            # 缓存里只记 doc_id，来源在这里现查 —— 改了数据包之后，
+            # 缓存答案的引用会跟着更新，不会留下一串过期的硬编码链接。
             metas = self.store.metadata_for_docs(cached.doc_ids)
-            return [
-                {
-                    "title": m.get("title", ""),
-                    "doc_type": m.get("doc_type", ""),
-                    "source_name": m.get("source_name", ""),
-                    "source_url": m.get("source_url", ""),
-                    "score": None,
-                }
-                for m in metas[:MAX_SOURCES]
-            ]
+            return [_source_payload(m, None) for m in metas[:MAX_SOURCES]]
         if mode == "no_answer":
             return []
         return _sources_from_hits(hits)

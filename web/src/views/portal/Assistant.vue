@@ -5,7 +5,16 @@ import { getCityPack } from '@/api/citypack'
 import SceneArt from '@/components/SceneArt.vue'
 import { useAsync } from '@/composables/useAsync'
 import { useReveal } from '@/composables/useReveal'
-import { QA_MODE_LABEL, type AiHealth, type Experience, type Product, type QaMode, type QaSource, type QaTurn } from '@/types'
+import {
+  QA_MODE_LABEL,
+  QA_SOURCE_KIND_LABEL,
+  type AiHealth,
+  type Experience,
+  type Product,
+  type QaMode,
+  type QaSource,
+  type QaTurn,
+} from '@/types'
 
 /**
  * M3 文旅知识问答。
@@ -200,6 +209,18 @@ const SOURCE_KIND: Record<string, string> = {
 
 function kindOf(source: QaSource) {
   return SOURCE_KIND[source.doc_type] ?? source.doc_type
+}
+
+/** 来源性质标签。后端没给这一格时退回中性文案 —— 不能默认显示成"原文可查" */
+function sourceKindLabel(source: QaSource) {
+  return QA_SOURCE_KIND_LABEL[source.source_kind] ?? '来源'
+}
+
+/** 徽标配色：可核对（绿）/ 站点级（金）/ 数据包自有（中性） */
+function sourceKindTone(source: QaSource) {
+  if (source.source_kind === 'detail') return 'ok'
+  if (source.source_kind === 'site') return 'warn'
+  return 'plain'
 }
 
 function modeClass(mode: QaMode | undefined) {
@@ -430,25 +451,56 @@ useReveal(root, packLoading)
 
               <p v-if="turn.error" class="turn__err small">{{ turn.error }}</p>
 
-              <!-- 来源 -->
+              <!-- 来源卡片：把"这段话从哪儿来"从一行小字升级成可点开的内容卡片。
+                   所有字段都来自知识库元数据（后端 _source_payload 组装），
+                   模型只负责上面的正文 —— 网址交给模型写就有编造的可能。 -->
               <div v-if="turn.meta?.sources.length" class="sources">
-                <div class="sources__head cap">来源 {{ turn.meta.sources.length }} 条</div>
+                <div class="sources__head">
+                  <!-- 写"检索命中"而不是"回答依据"：取的是 top-5 候选，
+                       模型实际用到的往往只有前一两张。说成"依据"是过度声称 ——
+                       用户核对时会以为每条都该在正文里找到对应内容。 -->
+                  <span class="cap">检索命中 {{ turn.meta.sources.length }} 条</span>
+                  <span class="cap sources__note">名称与链接取自知识库元数据，非模型生成</span>
+                </div>
                 <ul class="sources__list">
-                  <li v-for="(src, i) in turn.meta.sources" :key="i" class="source">
-                    <span class="source__idx num">{{ i + 1 }}</span>
-                    <span class="source__kind cap">{{ kindOf(src) }}</span>
-                    <span class="source__title">{{ src.title }}</span>
-                    <span class="source__from small muted">{{ src.source_name }}</span>
-                    <a
-                      v-if="src.source_url"
-                      class="source__link small"
-                      :href="src.source_url"
-                      target="_blank"
-                      rel="noopener noreferrer"
-                    >
-                      原文 ↗
-                    </a>
-                    <span v-else class="source__none cap muted">数据包自有</span>
+                  <li v-for="(src, i) in turn.meta.sources" :key="i" class="scard">
+                    <div class="scard__top">
+                      <span class="scard__kind cap">{{ kindOf(src) }}</span>
+                      <span class="scard__title">{{ src.title }}</span>
+                    </div>
+
+                    <p v-if="src.snippet" class="scard__intro">{{ src.snippet }}</p>
+
+                    <div class="scard__foot">
+                      <span class="scard__from small">
+                        <span class="scard__fromname">{{ src.source_name || '未标注来源' }}</span>
+                        <span class="scard__badge" :class="`scard__badge--${sourceKindTone(src)}`">
+                          {{ sourceKindLabel(src) }}
+                        </span>
+                      </span>
+                      <!-- 两个链接都开新标签页：本页对话只存在内存里，
+                           跳走再回来就清空了，而核对来源恰恰需要来回看 -->
+                      <span class="scard__links">
+                        <RouterLink
+                          v-if="src.poi_id"
+                          class="scard__link"
+                          :to="`/poi/${src.poi_id}`"
+                          target="_blank"
+                          rel="noopener"
+                        >
+                          站内详情 →
+                        </RouterLink>
+                        <a
+                          v-if="src.source_url"
+                          class="scard__link scard__link--ext"
+                          :href="src.source_url"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                        >
+                          查看原文 ↗
+                        </a>
+                      </span>
+                    </div>
                   </li>
                 </ul>
               </div>
@@ -1114,7 +1166,7 @@ useReveal(root, packLoading)
   }
 }
 
-/* 来源 */
+/* 来源卡片 */
 .sources {
   margin-top: var(--sp-2);
   padding-top: var(--sp-4);
@@ -1124,57 +1176,124 @@ useReveal(root, packLoading)
   gap: var(--sp-3);
 }
 .sources__head {
-  letter-spacing: 0.06em;
-  color: var(--warm-500);
-}
-.sources__list {
-  display: flex;
-  flex-direction: column;
-}
-.source {
   display: flex;
   align-items: baseline;
+  justify-content: space-between;
   gap: var(--sp-3);
-  padding: var(--sp-3) 0;
-  border-bottom: 1px solid var(--line-soft);
+  flex-wrap: wrap;
+  letter-spacing: 0.04em;
+  color: var(--warm-500);
+}
+.sources__note {
+  color: var(--warm-400);
+}
+/* 自动填充的网格：一条来源时不至于拉成一整行，五条时也不会挤成一列 */
+.sources__list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(288px, 1fr));
+  gap: var(--sp-3);
+}
+.scard {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding: var(--sp-3) var(--sp-4);
+  background: #fff;
+  border: 1px solid var(--line-soft);
+  /* 左侧绿线：与"可点开核对"的语义呼应，比整块投影更克制 */
+  border-left: 3px solid var(--brand-400);
+  border-radius: var(--r-md);
+  transition: border-color var(--dur-2) var(--ease), box-shadow var(--dur-2) var(--ease);
+}
+.scard:hover {
+  border-color: var(--line);
+  box-shadow: var(--sh-1);
+}
+.scard__top {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
   flex-wrap: wrap;
 }
-.source:last-child {
-  border-bottom: none;
-}
-.source__idx {
-  flex: none;
-  width: 18px;
-  font-size: var(--fs-cap);
-  font-weight: 700;
-  color: var(--brand-500);
-}
-.source__kind {
+.scard__kind {
   flex: none;
   padding: 2px 7px;
   color: var(--brand-600);
   background: var(--brand-50);
   border-radius: var(--r-sm);
 }
-.source__title {
+.scard__title {
   font-size: var(--fs-sm);
-  color: var(--ink-700);
-  font-weight: 500;
+  font-weight: 600;
+  color: var(--ink-900);
+  line-height: 1.5;
 }
-.source__from {
-  flex: 1;
+.scard__intro {
+  font-size: var(--fs-cap);
+  line-height: 1.7;
+  color: var(--ink-500);
+}
+.scard__foot {
+  margin-top: auto;
+  padding-top: var(--sp-2);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  flex-wrap: wrap;
+}
+.scard__from {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   min-width: 0;
+  color: var(--warm-500);
 }
-.source__link {
-  color: var(--tech-600);
-  font-weight: 500;
+.scard__fromname {
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
-.source__link:hover {
-  text-decoration: underline;
-}
-.source__none {
+.scard__badge {
   flex: none;
+  padding: 1px 6px;
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  border: 1px solid transparent;
+  border-radius: var(--r-sm);
+}
+.scard__badge--ok {
+  color: var(--brand-600);
+  background: var(--brand-50);
+  border-color: var(--brand-100);
+}
+.scard__badge--warn {
+  color: var(--gold-600);
+  background: var(--gold-50);
+  border-color: var(--gold-300);
+}
+.scard__badge--plain {
+  color: var(--ink-500);
+  background: var(--paper-2);
+  border-color: var(--line-soft);
+}
+.scard__links {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-3);
+  flex: none;
+}
+.scard__link {
+  font-size: var(--fs-cap);
+  font-weight: 500;
+  color: var(--brand-600);
+  white-space: nowrap;
+}
+.scard__link--ext {
+  color: var(--tech-600);
+}
+.scard__link:hover {
+  text-decoration: underline;
 }
 
 /* 输入区：去掉卡片感，只留一条上边线与输入框 */
@@ -1396,7 +1515,10 @@ useReveal(root, packLoading)
   .turn__qtext {
     font-size: 18px;
   }
-  .source__from {
+  .sources__list {
+    grid-template-columns: 1fr;
+  }
+  .scard__from {
     flex: 1 0 100%;
   }
   .stat__v--text {

@@ -30,7 +30,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "server-ai"))
 
 from app.config import get_settings  # noqa: E402
-from app.corpus import build_chunks  # noqa: E402
+from app.corpus import SOURCE_DATASET, build_chunks  # noqa: E402
 from app.embed import fit_embedder  # noqa: E402
 from app.store import KbStore  # noqa: E402
 
@@ -68,9 +68,23 @@ def main() -> int:
     for doc_type, count in sorted(by_type.items()):
         print(f"           {doc_type:<12} {count}")
 
-    missing_source = [c.chunk_id for c in chunks if not c.source_url]
-    if missing_source:
-        print(f"[build_kb] 警告：{len(missing_source)} 条切片没有来源链接，例如 {missing_source[:3]}")
+    # 来源盘点。按性质分开看，因为"没有外链"的含义完全不同：
+    #   dataset —— 体验与产品署"汉游智脑数据包"，本来就没有外部出处，属预期
+    #   detail / site —— 标着可核对来源却没有链接，那才是真问题
+    # 混在一起报会让人学会忽略警告，等真的缺链接时也就看不见了。
+    by_kind = Counter(c.source_kind for c in chunks)
+    print("[build_kb] 来源性质 " + "  ".join(f"{k}={v}" for k, v in sorted(by_kind.items())))
+    unexpected = [
+        c.chunk_id
+        for c in chunks
+        if not c.source_url and c.source_kind != SOURCE_DATASET
+    ]
+    if unexpected:
+        print(
+            f"[build_kb] 警告：{len(unexpected)} 条切片标为可核对来源却没有链接，"
+            f"例如 {unexpected[:3]}",
+            file=sys.stderr,
+        )
 
     if args.dump:
         limit = args.dump

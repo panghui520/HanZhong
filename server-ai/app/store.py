@@ -1,6 +1,6 @@
 """Chroma 向量库的读写封装，以及检索的入口。
 
-三个约定值得说明：
+四个约定值得说明：
 
 1. **collection 名带向量化实现的指纹**（`kb_city__ngram2048x123-<别名指纹>`）。
    Chroma 的集合维度是固定的，把两种 embedding 的向量混进同一个集合会静默出错。
@@ -15,6 +15,10 @@
    向量负责"别漏掉"，排序由 **RRF 融合**负责 —— 只用两路的名次、不用分数，
    因为 BM25 归一化分与余弦本来就不可比（实测加权方案随权重单调变差）。
    改用 RRF 的完整对比数据写在 `query` 的 docstring 里。
+
+4. **来源性质随元数据落库**（`source_kind` / `snippet`）。
+   查询侧不重新判断"这条来源可不可核对"——那是语料构建时的结论，
+   存进来、原样传给前端即可。排序与召回完全不看这两个字段。
 """
 
 from __future__ import annotations
@@ -105,6 +109,14 @@ def _flatten_metadata(chunk: Chunk) -> dict[str, Any]:
     if chunk.data_origin:
         meta["data_origin"] = chunk.data_origin
 
+    # 来源性质与简介（M3 来源卡片用，见 corpus.py 顶部「来源分三档」）。
+    # source_kind **一定写**：它是前端"该不该给外链、给哪种标签"的判据，
+    # 缺了这一格前端只能猜，而猜错的表现就是给一条点进去找不到内容的链接。
+    # snippet 允许为空 —— 抽不出简介时前端只是少一行，不该因此报错。
+    meta["source_kind"] = chunk.source_kind
+    if chunk.snippet:
+        meta["snippet"] = chunk.snippet
+
     for key, value in chunk.extra.items():
         if isinstance(value, (str, int, float, bool)) and value != "":
             meta[key] = value
@@ -112,12 +124,27 @@ def _flatten_metadata(chunk: Chunk) -> dict[str, Any]:
 
 
 def corpus_fingerprint(chunks: Sequence[Chunk], signature: str) -> str:
-    """语料 + 向量化实现的指纹。用来判断索引是否需要重建。"""
+    """语料 + 向量化实现的指纹。用来判断索引是否需要重建。
+
+    **元数据也算进来**（来源名/链接/性质/简介）。只算 chunk_id + 正文是不够的：
+    给文档补一列来源、改一次简介，都不会动到正文，指纹就会认为"没变化"、
+    `is_stale` 返回 False，而新字段其实根本没进库 —— 前端静默拿到空简介、
+    来源退化成默认档，日志里一句话都没有。这种"看起来正常"的不一致最难查，
+    所以宁可让指纹敏感一点：元数据变了就要求重建，代价只是重跑一次建库脚本。
+    """
     digest = hashlib.blake2b(digest_size=16)
     digest.update(signature.encode("utf-8"))
     for chunk in chunks:
         digest.update(chunk.chunk_id.encode("utf-8"))
         digest.update(chunk.text.encode("utf-8"))
+        for value in (
+            chunk.source_name,
+            chunk.source_url,
+            chunk.source_kind,
+            chunk.snippet,
+        ):
+            digest.update(b"\x1f")
+            digest.update(value.encode("utf-8"))
     return digest.hexdigest()
 
 
@@ -201,6 +228,7 @@ class KbStore:
                     "chunks": len(chunks),
                     "docs": len({c.doc_id for c in chunks}),
                     "by_type": _count_by_type(chunks),
+                    "by_source_kind": _count_by_source_kind(chunks),
                     "fingerprint": corpus_fingerprint(chunks, embedder.signature),
                 },
                 ensure_ascii=False,
@@ -383,4 +411,14 @@ def _count_by_type(chunks: Sequence[Chunk]) -> dict[str, int]:
     counts: dict[str, int] = {}
     for chunk in chunks:
         counts[chunk.doc_type] = counts.get(chunk.doc_type, 0) + 1
+    return counts
+
+
+def _count_by_source_kind(chunks: Sequence[Chunk]) -> dict[str, int]:
+    """按来源性质统计。写进 manifest 是为了让"有多少文档真有可核对的具体页面"
+    变成一个能一眼看到的数字，而不是要翻 80 条记录才发现全指向同一个首页。
+    """
+    counts: dict[str, int] = {}
+    for chunk in chunks:
+        counts[chunk.source_kind] = counts.get(chunk.source_kind, 0) + 1
     return counts
