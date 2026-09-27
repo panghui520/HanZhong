@@ -1,16 +1,107 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import PoiImage from '@/components/PoiImage.vue'
+import DiversionNoticeBar from '@/components/DiversionNoticeBar.vue'
 import { getExperiences, getPoiDetail, getProducts } from '@/api/citypack'
 import { getPoiImages } from '@/api/media'
+import { createCheckin } from '@/api/trips'
 import { ApiError } from '@/api/http'
 import { useAsync } from '@/composables/useAsync'
+import { usePoiStats } from '@/composables/usePoiStats'
+import { useDiversionNotices } from '@/composables/useDiversionNotices'
+import { useSessionStore } from '@/stores/session'
 import { BUSINESS_LABEL, type Experience, type Poi, type Product, type RelationItem } from '@/types'
-import { capacityUsage, todayVisitors, weekVisitors, ratingOf } from '@/mock/stats'
+// 承载力已接真实数据（M5，见下方 usePoiStats）。本文件仍留在 mock 里的只有
+// ratingOf / reviewsOf —— 那是 M6 评价域的数据，poi 表没有评分列、
+// order_review 也还没有面向资源点的查询接口，等 M6 补齐后一并去掉。
+import { ratingOf } from '@/mock/stats'
 import { reviewsOf } from '@/mock/reviews'
 
 const route = useRoute()
+const router = useRouter()
+const session = useSessionStore()
+
+// ----------------------------------------------------------------------
+// 到访打卡（M6 到访消费链）
+//
+// 这是整条消费链的**起点**：打卡 → 足迹 → 「乡村好物」先给你看体验过的
+// → 订单被标成"到访消费（TRIP）"而不是"离境复购"。
+//
+// 只传 poi_id，**不传 source**：source 是"这条足迹是怎么来的"的标注，
+// 只有系统能说"这次到访是分流引导来的"。由前端传的话，
+// 大屏上的"分流贡献量"就成了可以自己填的数。服务端会忽略这个键。
+//
+// 未登录时给提示再跳登录页，与 Goods.vue 的加购同一处理：
+// 提示必须比跳转早 0.8 秒 —— 页面一跳，提示条（组件状态）就没了，
+// 用户看到的是"点了按钮，莫名其妙到了登录页"。
+// ----------------------------------------------------------------------
+/**
+ * "我今天打过卡没有"的本地态（修复 A10：离开页面再回来按钮回到初始态）。
+ *
+ * 为什么用 sessionStorage（与本项目已有的 frontend-session-persistence 一致）：
+ * ① 它是"这一次访问的状态"，不是长期资产 —— 关掉标签页就该清掉，跟
+ *    `Agent.vue` 的对话历史同一处取舍。
+ * ② localStorage 会把同一台机器上别人的打卡记录留给下一个人看。
+ *
+ * 为什么不直接调接口"我今天打卡了没"：
+ * 之前在这里写过 —— "为了一个纯展示的状态多打一次接口，而这个状态
+ * 本来就不影响任何别的显示"。sessionStorage 的代价是**关掉标签页
+ * 就丢**：用户重新打开页面会看到"我到过这里"按钮可点 —— 但服务端
+ * 打卡是**幂等**的（B7），第二次点击仍然成功，所以最坏只是文案误导。
+ *
+ * 这里的 key 是按天滚动的：换日自然就过期，无需主动清理。
+ */
+const CHECKIN_KEY_PREFIX = 'hanyou_trip_checkins_'
+function loadCheckedPoisToday(): Set<string> {
+  const key = CHECKIN_KEY_PREFIX + new Date().toISOString().slice(0, 10)
+  try {
+    const raw = sessionStorage.getItem(key)
+    return new Set(raw ? (JSON.parse(raw) as string[]) : [])
+  } catch {
+    return new Set()
+  }
+}
+function markCheckedPoiToday(poiId: string) {
+  const key = CHECKIN_KEY_PREFIX + new Date().toISOString().slice(0, 10)
+  const set = loadCheckedPoisToday()
+  set.add(poiId)
+  try {
+    sessionStorage.setItem(key, JSON.stringify([...set]))
+  } catch {
+    /* 配额爆掉就当没记，不影响主体功能：服务端幂等兜底 */
+  }
+}
+
+const checkinBusy = ref(false)
+const checkedIn = ref(false)
+const checkinMsg = ref('')
+/** 正在被送去登录页。防重复点击，与 Goods.vue 的 leaving 同一用途 */
+const checkinLeaving = ref(false)
+
+async function doCheckin() {
+  if (!session.isLoggedIn) {
+    if (checkinLeaving.value) return
+    checkinLeaving.value = true
+    checkinMsg.value = '请先登录，再把这次到访记下来'
+    window.setTimeout(() => {
+      void router.push({ path: '/login', query: { redirect: route.fullPath } })
+    }, 800)
+    return
+  }
+  if (checkinBusy.value || !poi.value) return
+  checkinBusy.value = true
+  try {
+    await createCheckin({ poi_id: poi.value.id })
+    checkedIn.value = true
+    markCheckedPoiToday(poi.value.id)
+    checkinMsg.value = '已记入我的足迹 —— 下次它会决定先给你看什么'
+  } catch (e) {
+    checkinMsg.value = e instanceof ApiError ? e.message : '打卡失败，请稍后重试'
+  } finally {
+    checkinBusy.value = false
+  }
+}
 
 /**
  * 详情页数据。
@@ -54,6 +145,22 @@ const poi = computed<Poi | undefined>(() => data.value?.detail.poi)
 const experiences = computed<Experience[]>(() => data.value?.experiences ?? [])
 const products = computed<Product[]>(() => data.value?.products ?? [])
 
+// poi 切换时，从 sessionStorage 恢复"已打卡"本地态。
+// 注意：只有"今天"的打卡算 —— KEY 是按天滚动的，明天自动失效。
+watch(
+  () => poi.value?.id,
+  (id) => {
+    if (!id) {
+      checkedIn.value = false
+      checkinMsg.value = ''
+      return
+    }
+    checkedIn.value = loadCheckedPoisToday().has(id)
+    checkinMsg.value = ''
+  },
+  { immediate: true }
+)
+
 /** 该景点的实拍图，按后端给的 sort_order 排。url 为空的（理论上不会有）滤掉 */
 const images = computed(() => (data.value?.images ?? []).filter((i) => !!i.url))
 
@@ -87,30 +194,74 @@ function fmtKm(km?: number) {
   return km < 1 ? '同址' : `${Math.round(km)} km`
 }
 
-const usage = computed(() => (poi.value ? capacityUsage(poi.value.id, poi.value.business_type) : 0))
-const overloaded = computed(() => usage.value >= 0.8)
+/**
+ * 承载力（M5，真实数据）。
+ *
+ * 数字来自 `/api/stats/pois`（合成客流，`synthetic=true`），不再是按 id 派生的
+ * 伪随机值。`stat` 为 undefined 表示"还没加载完 / 接口失败 / 该点位确实没编数据"，
+ * 三种情况在界面上统一显示 "—" —— **不能回落成 0**：
+ * 0% 是"很空"（一个结论），读不到是"不知道"（另一个结论），
+ * 把后者显示成前者等于凭空给了一个结论。
+ */
+const { statOf, usageOf } = usePoiStats()
+const stat = computed(() => (poi.value ? statOf(poi.value.id) : undefined))
+const usage = computed(() => (stat.value?.has_data ? stat.value.capacity_usage : undefined))
+const overloaded = computed(() => (usage.value ?? 0) >= 0.8)
+const usageText = computed(() => (usage.value == null ? '—' : `${Math.round(usage.value * 100)}%`))
+const usageWidth = computed(() => `${Math.min(usage.value ?? 0, 1) * 100}%`)
 
 /**
- * 乡村分流建议。
- * 候选来自后端的 diversion 关系（景区 → 可承接的乡村，按距离由近到远）；
- * "当前承载是否宽裕"要等 M5 接入真实客流后才有，这里先用仿真值过滤，
- * 所以 M1 的这条链路是"空间上可承接"，不含承载判断。
+ * 乡村分流建议（自动）。
+ *
+ * 候选来自后端的 diversion 关系（景区 → 可承接的乡村，按距离由近到远）。
+ * M1 阶段这里用仿真承载值过滤，是"空间上可承接"；现在换成真实承载，
+ * 才是"**当前**可承接"—— 这正是 M5 对这条链路的交付（见模块文档的
+ * "M5 → M1（反向）前端层依赖"）。
+ *
+ * **承载未知的乡村点不进列表**：这一块的说服力全在"当前宽裕"四个字上，
+ * 拿一个读不到承载的点来凑数，等于把一个可核对的建议变成不可核对的。
+ *
+ * <p>★ 它与下方的「分流公告」是**两套来源**，优先级由 `v-if` 决定：
+ * 有运营发布的公告时，只显示公告（公告是人工审过、有署名的版本），
+ * 这一块让位。没有公告时才由这一块兜底 —— 页面不至于因为"没人发布"
+ * 就什么都不提示。两者的候选来源目前不同（这边是 M1 的边，那边是
+ * `DiversionAdvisor`），**同一时刻只出现一个**，所以游客看不到两套说法。
  */
 const diversions = computed(() =>
   (data.value?.detail.diversion ?? [])
-    .map((r) => ({ ...r, u: capacityUsage(r.id, r.business_type) }))
-    .filter((r) => r.u < 0.75)
+    .flatMap((r) => {
+      const u = usageOf(r.id)
+      return u != null && u < 0.75 ? [{ ...r, u }] : []
+    })
     .slice(0, 3)
 )
+
+/**
+ * 与本资源点相关的分流公告（M5 续）。
+ *
+ * 只取 `from_poi_id === 本点` 的：公告说的是"**这个点**挤了，改往别处"，
+ * 所以它只属于那个溢出的点。本点作为**候选**出现在别人的公告里时，
+ * 不该在这里显示 —— 游客打开候选点详情页时要知道的是"这里现在怎么样"，
+ * 而不是"别人被建议来这里"。
+ *
+ * 不过滤 `available_count`：详情页是游客已经主动点进来之后看到的页面，
+ * 这里给的是完整信息（含"当前已不宽裕"），首页那条才做"全满就不显示"的收敛。
+ */
+const { forPoi: noticesForPoi } = useDiversionNotices()
+const diversionNotices = computed(() => (poi.value ? noticesForPoi(poi.value.id) : []))
 
 const nearby = computed<RelationItem[]>(() => data.value?.detail.nearby ?? [])
 const nearbyBusiness = computed<RelationItem[]>(() => data.value?.detail.support ?? [])
 
 const reviews = computed(() => (poi.value ? reviewsOf(poi.value.id, poi.value.business_type) : []))
 
-const trend = computed(() => (poi.value ? weekVisitors(poi.value.id, poi.value.capacity, poi.value.business_type) : []))
+/** 近 7 日客流（不含今天），后端按时间正序给 */
+const trend = computed(() => stat.value?.week_visitors ?? [])
 const trendMax = computed(() => Math.max(1, ...trend.value))
-const visitors = computed(() => (poi.value ? todayVisitors(poi.value.id, poi.value.capacity, poi.value.business_type) : 0))
+const visitors = computed(() => (stat.value?.has_data ? stat.value.today_visitors : undefined))
+const visitorsText = computed(() =>
+  visitors.value == null ? '—' : visitors.value.toLocaleString()
+)
 const rating = computed(() => (poi.value ? ratingOf(poi.value.id) : 0))
 </script>
 
@@ -171,6 +322,30 @@ const rating = computed(() => (poi.value ? ratingOf(poi.value.id) : 0))
           <h1 class="display dhero__title">{{ poi.name }}</h1>
           <p class="dhero__sub">{{ poi.summary }}</p>
 
+          <!--
+            到访打卡（M6 到访消费链）。放在首屏标题下面而不是侧栏：
+            它是整条消费链的起点，而且用户"到过这里"这件事只在他
+            站在这个页面的这一刻说得清 —— 埋进侧栏等于让人去找。
+            按钮的文案与状态都由本地维护（打卡成功即置灰），
+            不额外请求"我今天打卡了没"：那会为了一个纯展示的状态
+            多打一次接口，而这个状态本来就不影响任何别的显示。
+          -->
+          <div class="dhero__acts">
+            <button
+              class="btn btn-gold btn-sm"
+              :disabled="checkinBusy || checkedIn"
+              @click="doCheckin"
+            >
+              <span v-if="checkinBusy">记录中…</span>
+              <span v-else-if="checkedIn">已记入足迹</span>
+              <span v-else>我到过这里</span>
+            </button>
+            <router-link v-if="checkedIn" to="/footprints" class="dhero__actlink">
+              查看我的足迹
+            </router-link>
+            <span v-if="checkinMsg" class="dhero__actmsg">{{ checkinMsg }}</span>
+          </div>
+
           <!-- Hero 底部速览：把原来只存在于侧栏的关键信息提到首屏 -->
           <div class="dhero__quick">
             <div class="quick">
@@ -188,7 +363,7 @@ const rating = computed(() => (poi.value ? ratingOf(poi.value.id) : 0))
             <div class="quick">
               <span class="quick__label">当前承载</span>
               <span class="num quick__val" :class="{ 'quick__val--hot': overloaded }">
-                {{ Math.round(usage * 100) }}<i>%</i>
+                {{ usageText }}
               </span>
             </div>
             <span class="quick__sep" />
@@ -199,6 +374,22 @@ const rating = computed(() => (poi.value ? ratingOf(poi.value.id) : 0))
           </div>
         </div>
       </header>
+
+      <!--
+        ============ 分流公告（M5 续）============
+        排在 Hero 之后、正文之前：游客打开这个页面最先要回答的问题是
+        "我还该不该来这里"。公告是运营审过、有署名的版本，所以它比
+        侧栏那块自动的「分流建议」更靠前 —— 但两者不会同时出现，
+        见 script 里 diversions 的注释。
+      -->
+      <section v-if="diversionNotices.length" class="container dnwrap">
+        <DiversionNoticeBar
+          v-for="n in diversionNotices"
+          :key="n.id"
+          :notice="n"
+          variant="inline"
+        />
+      </section>
 
       <!-- ============ 实景照片（M9）============ -->
       <!--
@@ -400,19 +591,19 @@ const rating = computed(() => (poi.value ? ratingOf(poi.value.id) : 0))
             </div>
           </div>
 
-          <!-- 承载状态 -->
+          <!-- 承载状态。数字来自 /api/stats/pois（合成客流），读不到时显示 "—" -->
           <div class="card loadcard">
             <div class="loadcard__head">
-              <span class="eyebrow">实时承载</span>
+              <span class="eyebrow">当日承载</span>
               <span class="num loadcard__pct" :class="{ 'loadcard__pct--hot': overloaded }">
-                {{ Math.round(usage * 100) }}%
+                {{ usageText }}
               </span>
             </div>
             <div class="loadcard__bar">
-              <i :class="{ 'loadcard__fill--hot': overloaded }" :style="{ width: Math.min(usage, 1) * 100 + '%' }" />
+              <i :class="{ 'loadcard__fill--hot': overloaded }" :style="{ width: usageWidth }" />
             </div>
             <p class="muted small loadcard__note">
-              今日到访约 {{ visitors.toLocaleString() }} 人 / 承载上限
+              今日到访约 {{ visitorsText }} 人 / 承载上限
               {{ poi.capacity.toLocaleString() }} 人
             </p>
 
@@ -428,9 +619,24 @@ const rating = computed(() => (poi.value ? ratingOf(poi.value.id) : 0))
             <p class="muted small">近 7 日客流趋势（仿真）</p>
           </div>
 
-          <!-- 分流建议 -->
-          <div v-if="overloaded && diversions.length" class="card divcard">
-            <span class="eyebrow">AI 分流建议</span>
+          <!--
+            分流建议（自动兜底）。候选是后端算好的 diversion 关系，再按**真实承载**
+            过滤，所以这里是"当前可承接"而不是 M1 阶段的"空间上可承接"。
+
+            **有运营发布的公告时整块让位**（`!diversionNotices.length`）：
+            两块的候选来源不同，同时显示会变成"两套说法"。
+            公告是人工审过的，优先级更高。
+
+            标题**刻意不写「AI」**：这一块的判定全程是确定性的 ——
+            距离与方向来自 poi_relation，承载阈值来自 risk_rule，
+            没有一步经过模型。把确定性结论标成 AI 生成，
+            恰好丢掉了本系统最值得讲的那一点（规则引擎判、模型只负责解释）。
+          -->
+          <div
+            v-if="overloaded && diversions.length && !diversionNotices.length"
+            class="card divcard"
+          >
+            <span class="eyebrow">分流建议 · 规则引擎判定</span>
             <p class="divcard__desc">
               该点位承载已接近上限，系统建议把部分行程引导至以下乡村点——
               车程更短、当前承载宽裕，且具备可体验、可消费的乡村业态。
@@ -522,6 +728,31 @@ const rating = computed(() => (poi.value ? ratingOf(poi.value.id) : 0))
   line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
+}
+
+/*
+  到访打卡那一条（M6 到访消费链）。
+  与速览条同为 Hero 内的附加行，但排在它上面：打卡是**动作**，
+  速览是**信息**，动作要更靠近标题。
+  消息文字用半透明白而不是独立色块 —— Hero 上叠任何实色块
+  都会把照片压暗一块，而这句话只是按钮的注解，不是独立提示条。
+*/
+.dhero__acts {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+  margin-top: var(--sp-5);
+}
+.dhero__actlink {
+  font-size: 14px;
+  color: rgba(255, 255, 255, 0.86);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.dhero__actmsg {
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.72);
 }
 
 /* Hero 首屏速览条 */
@@ -930,6 +1161,14 @@ const rating = computed(() => (poi.value ? ratingOf(poi.value.id) : 0))
 }
 .spark__bar:hover {
   background: var(--brand-500);
+}
+
+/* 分流公告：夹在深色 Hero 与正文之间，给上下留出呼吸。
+   多条同时生效时叠成一列 —— 12px 卡间距让它们读成一组。 */
+.dnwrap {
+  margin-top: var(--sp-6);
+  display: grid;
+  gap: var(--sp-3);
 }
 
 .divcard {

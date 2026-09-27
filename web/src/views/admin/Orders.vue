@@ -32,6 +32,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { adminHandleRefund, adminListOrders, adminShipOrder } from '@/api/order'
 import { ApiError } from '@/api/http'
+import { useNotice } from '@/composables/useNotice'
 import { when } from '@/utils/format'
 import type { Order, OrderAction, OrderStatus } from '@/types'
 
@@ -39,13 +40,8 @@ const orders = ref<Order[]>([])
 const loading = ref(true)
 const busyId = ref<number | null>(null)
 
-const notice = ref<{ type: 'ok' | 'err'; text: string } | null>(null)
-let noticeTimer: number | undefined
-function say(type: 'ok' | 'err', text: string) {
-  notice.value = { type, text }
-  if (noticeTimer !== undefined) window.clearTimeout(noticeTimer)
-  noticeTimer = window.setTimeout(() => (notice.value = null), 4000)
-}
+/** 操作提示条。逻辑在 composable 里，样式在下方（scoped style 进不了组合式函数） */
+const { notice, say } = useNotice()
 
 async function load() {
   loading.value = true

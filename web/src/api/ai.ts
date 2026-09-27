@@ -2,13 +2,14 @@ import type {
   AgentEvent,
   AgentHandlers,
   AiHealth,
+  OpsAnalysis,
   QaEvent,
   QaHandlers,
 } from '@/types'
 import { ApiError, authHeaders, request } from './http'
 
 /**
- * AI 能力（M3 知识问答 + M4 旅游助手）的接口层。
+ * AI 能力（M3 知识问答 + M4 旅游助手 + M7 运营解读）的接口层。
  *
  * 与 citypack.ts 的区别：这里除了普通 JSON 请求，还有**流式**接口。
  * 流式不能用 fetch + res.json()，必须自己读 ReadableStream 并按 SSE 分帧。
@@ -33,6 +34,33 @@ export function getAiHealth() {
 /** 推荐问题。知识库不可用时后端返回空数组，页面隐藏推荐区即可 */
 export function getSuggestions() {
   return request<string[]>(`${AI_PATH}/suggestions`)
+}
+
+/**
+ * M7 运营解读：把快照里的一组指标讲成三段式。
+ *
+ * **非流式**，与上面两个问答接口不同 —— 那是"边生成边看"的对话，
+ * 这是"点一下出一个结论"的报表动作。非流式才能一次拿到完整结构
+ * （三段正文 + 依据 + 模式），页面拿到就渲染，不必自己把 SSE 碎片拼成对象。
+ *
+ * **路径为什么是 `/admin/ops/analyze` 而不是 `/api/ai/analyze/ops`：**
+ * `/api/ai/**` 在后端是整段公开的（问答对游客开放），而这里的返回正文与
+ * 「依据」里带着销售额、复购率、待处置风险数 —— 是**运营数据**的解读。
+ * 放在 `/api/admin/**` 下才会被统一收进 OPERATOR 角色。所以这个函数
+ * **必须带令牌**：未登录会拿到 4001，`request()` 会自动带上 Authorization。
+ *
+ * 失败不在这里兜成"没有解读"：4001/3001/3002 都是**真的出错了**，
+ * 该让页面显示错误；而"模型没解读出来"不是错误 —— 后端会正常返回 200，
+ * 只是 `mode` 为 `unavailable`、`sections` 为空。两者别混。
+ *
+ * @param focus 解读维度。取值见 `OPS_FOCUSES`，后端与 Python 各有白名单校验
+ */
+export function analyzeOps(focus: string) {
+  return request<OpsAnalysis>('/admin/ops/analyze', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ focus }),
+  })
 }
 
 /**

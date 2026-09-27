@@ -1,55 +1,29 @@
 /**
- * 演示用仿真指标（SIMULATED）
+ * 演示用仿真指标（SIMULATED）—— **仅剩口碑评分一项**
  * ------------------------------------------------------------------
- * 这些数字不是真实统计，而是由 POI id 派生的确定性伪随机值。
+ * 承载力的三个函数（capacityUsage / todayVisitors / weekVisitors）已于 M5
+ * 迁到真实数据，见 `composables/usePoiStats.ts`（读 `/api/stats/pois`）。
+ * 那三个函数的区间设计（按业态分档、让热点景区超载而乡村闲置）没有白写 ——
+ * 它现在活在后端 `scripts/gen_synthetic.py` 的 USAGE_RANGE 里，
+ * 规则引擎正是靠那份区间才在 42 个点位上触发出 17 条风险事件。
  *
- * 为什么按业态分档：本项目要演示的核心叙事是「热点景区超载 + 周边乡村闲置」，
- * 如果各业态承载在同一个区间里均匀取值，这个失衡就看不出来，规则引擎也不会触发。
- * 因此按业态设定不同区间——景区整体偏高（含超载样本），乡村整体偏低（有承接余量），
- * 餐饮住宿交通居中。区间是设计选择，不是真实观测值。
+ * 为什么 ratingOf 还留在这里
+ * ------------------------------------------------------------------
+ * `poi` 表没有评分列，后端也没有"按资源点查评价"的接口 ——
+ * `order_review` 是 M6 的**订单**评价（一单一评），要聚合成资源点口碑
+ * 得先有一条 order_item → poi_id 的聚合查询，那是 M6 的事，不在 M5 范围内。
+ * 所以这里先保留伪随机值。
  *
- * 后端规则引擎上线后，本文件整体删除，改为读取 /api/stats。
+ * 它**不是没有声明**：详情页底部有一条页面级免责声明，明确写了
+ * "承载力、客流、评分与游客评价均为演示用仿真数据（SIMULATED）"。
+ * 之所以靠页面级声明而不是逐字段标"仿真"，是因为这一页上仿真与真实混在一起
+ * （门票、开放时间、体验、产品都是数据包里的真值），逐字段标反而会让人以为
+ * 没标的那些也是真的。**删除本文件时别忘了同步改那条声明** ——
+ * 否则声明会继续声称评分是仿真数据，而那时它已经不是了。
+ *
+ * M6 补齐资源点评价聚合接口后，本文件连同 `mock/reviews.ts` 一起删除。
  */
 import { seed } from './hash'
-import type { BusinessType } from '@/types'
-
-/** 各业态的承载占用率区间 [下限, 上限]，上限可 >1 表示超载 */
-const USAGE_RANGE: Record<BusinessType, [number, number]> = {
-  // 热点景区：区间 [0.25,1.15] 使 18 个景区里约 7 个进入高位（≥80%）、约 3 个超载，
-  // 比"半数以上高位"更接近真实——真正挤的永远只有少数几个头部点位。
-  SCENIC: [0.25, 1.15],
-  RURAL_SPOT: [0.22, 0.67], // 乡村：整体宽裕，才有承接空间
-  FOOD: [0.35, 0.88],
-  LODGING: [0.3, 0.8],
-  TRANSPORT: [0.4, 0.9],
-  SHOPPING: [0.25, 0.7],
-}
-
-/** 承载力占用率（>1 表示超载） */
-export function capacityUsage(poiId: string, type: BusinessType = 'SCENIC'): number {
-  const [lo, hi] = USAGE_RANGE[type] ?? USAGE_RANGE.SCENIC
-  return Number((lo + seed(poiId, 'usage') * (hi - lo)).toFixed(4))
-}
-
-/** 当日到访人数 */
-export function todayVisitors(poiId: string, capacity: number, type?: BusinessType): number {
-  const ratio = 0.55 + seed(poiId, 'day') * 0.5
-  return Math.round(capacity * capacityUsage(poiId, type) * ratio)
-}
-
-/** 近 7 日客流（用于趋势图与迷你柱图） */
-export function weekVisitors(
-  poiId: string,
-  capacity: number,
-  type?: BusinessType
-): number[] {
-  const u = capacityUsage(poiId, type)
-  return Array.from({ length: 7 }, (_, i) => {
-    const weekend = i >= 5 ? 1.35 : 1
-    const jitter = 0.8 + seed(poiId, 'wk', i) * 0.4
-    return Math.round(capacity * u * 0.6 * weekend * jitter)
-  })
-}
 
 /** 评分（4.2–4.9） */
 export function ratingOf(poiId: string): number {

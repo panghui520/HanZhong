@@ -5,8 +5,10 @@ import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.function.Function;
 import java.util.regex.Pattern;
@@ -26,11 +28,13 @@ import com.hanyou.brain.entity.CartItem;
 import com.hanyou.brain.entity.Order;
 import com.hanyou.brain.entity.OrderItem;
 import com.hanyou.brain.entity.OrderReview;
+import com.hanyou.brain.entity.TripCheckin;
 import com.hanyou.brain.mapper.AppUserMapper;
 import com.hanyou.brain.mapper.CartItemMapper;
 import com.hanyou.brain.mapper.OrderItemMapper;
 import com.hanyou.brain.mapper.OrderMapper;
 import com.hanyou.brain.mapper.OrderReviewMapper;
+import com.hanyou.brain.mapper.TripCheckinMapper;
 import com.hanyou.brain.media.MediaStorageService;
 import com.hanyou.brain.vo.CartItemVO;
 import com.hanyou.brain.vo.OrderCountVO;
@@ -136,8 +140,39 @@ public class OrderService {
     /** 评价最多 3 张图。再多就不像评价、像相册了，也没有哪个运营会去看 */
     private static final int MAX_REVIEW_IMAGES = 3;
 
-    /** 离境复购。本轮所有订单都走这个渠道，TRIP 那一侧等 M6 完整版 */
+    /**
+     * 订单渠道：**离境复购**。用户在没到访过（或已离开到访窗口）的情况下下单。
+     */
     private static final String CHANNEL_REPURCHASE = "REPURCHASE";
+
+    /**
+     * 订单渠道：**到访消费**。下单时该用户对订单中商品的体验锚点或产地
+     * 有**新鲜足迹**，说明这笔消费发生在"到访消费链"上（他刚去过，所以带走）。
+     *
+     * <p>这一列在 M6 到访消费链落地之前是硬编码的常量（所有订单都是
+     * {@code REPURCHASE}），也就是说"到访消费"这条链在数据上从未产生过一单 ——
+     * 于是创新点二讲的"从到访消费到离境复购"只有后半段。现在由足迹判定。
+     */
+    private static final String CHANNEL_TRIP = "TRIP";
+
+    /**
+     * "还在这次到访里"的窗口：足迹距下单不超过 3 天，算 {@code TRIP}。
+     *
+     * <p><b>为什么需要一个窗口，而不是"有足迹就算"：</b>
+     * 没有窗口的话，一个去过汉中的用户**两年后**再买，仍然会被算成"到访消费"——
+     * 那"离境复购"就永远统计不出来，而这个数字正是创新点二的效果证据。
+     * 反过来，把窗口设成"必须有足迹"又太松：演示里"两周后回来复购"这一步
+     * 会归错类。
+     *
+     * <p><b>为什么是 3 天：</b>汉中乡村体验的典型行程是 2–3 天
+     * （M4 的行程规划按天排、每日预算 360 分钟，演示案例是 2 天）。
+     * 3 天覆盖"一次到访期间 + 返程当天"，再往后就是离开之后的复购了。
+     *
+     * <p>这是**落地时定的口径**，方案里没写窗口（见验收记录的「落地差异」）。
+     * 定成常量而不是散在代码里：它只出现在这一处判定里，但答辩时会被问
+     * "多久算离境"，需要一个能指着说的地方。
+     */
+    private static final int TRIP_WINDOW_DAYS = 3;
 
     /**
      * 手机号：11 位、1 开头、第二位 3-9。
@@ -166,6 +201,14 @@ public class OrderService {
 
     /** 订单评价。一单一评，唯一键在库里 */
     private final OrderReviewMapper orderReviewMapper;
+
+    /**
+     * 到访足迹（M6 到访消费链）。
+     *
+     * <p>下单时只**读**它：用来判这一单是"到访消费"还是"离境复购"。
+     * 判定口径见 {@link #resolveChannel}。
+     */
+    private final TripCheckinMapper tripCheckinMapper;
 
     /**
      * 评价图片在库里存成 JSON 数组字符串，进出各序列化一次。
@@ -355,7 +398,8 @@ public class OrderService {
         order.setReceiverPhone(phone);
         order.setReceiverAddress(address);
         order.setRemark(StringUtils.hasText(remark) ? truncate(remark.trim(), 255) : null);
-        order.setChannel(CHANNEL_REPURCHASE);
+        // ★ 渠道由**足迹**判定，不是常量。见 resolveChannel 的口径说明。
+        order.setChannel(resolveChannel(userId, items));
         orderMapper.insert(order);
 
         for (OrderItem it : items) {
@@ -372,6 +416,71 @@ public class OrderService {
         // 不回读的话，下单响应里 created_at 会整个缺失（全局 non_null 序列化），
         // 前端拿到的订单对象比列表接口少两个字段。
         return attachItems(List.of(orderMapper.selectById(order.getId())), Map.of(), false).get(0);
+    }
+
+    /**
+     * 判定这一单是「到访消费（TRIP）」还是「离境复购（REPURCHASE）」。
+     *
+     * <p><b>口径（唯一一处，别处不许再判）：</b>
+     * 取订单里每件商品的**体验锚点**（{@code order_item.experience_id}）与
+     * **产地**（{@code order_item.poi_id}）—— 这两个值在下单时已经被快照到
+     * 明细行上（见 {@code createOrder} 里那段红线注释）。若该用户对其中
+     * 任何一个在 {@link #TRIP_WINDOW_DAYS} 天内有足迹，就是 {@code TRIP}。
+     *
+     * <p><b>为什么用订单明细上的快照、而不是拿 product_id 反查商品：</b>
+     * 商品会被数据包重灌、可能下架或被换掉产地。用明细行的快照，
+     * "这一单当时挂的是哪个体验"这件事永远说得清 —— 与
+     * {@code order_item} 冗余这两个字段的理由完全一致。
+     *
+     * <p><b>为什么要按体验与产地两个方向查：</b>
+     * 红线允许商品只挂其中之一（{@code chk_product_traceable}：
+     * {@code poi_id} 与 {@code experience_id} 至少一项非空）。只查体验的话，
+     * 只挂产地的商品永远判不出 TRIP；只查产地的话，用户在体验现场打卡、
+     * 买的是同体验下另一个村的产品时又会漏判。
+     *
+     * <p><b>查不到足迹不是错误</b>：绝大多数线上订单都没有足迹，
+     * 那是 {@code REPURCHASE} 的正常路径，不是异常分支。
+     */
+    private String resolveChannel(Long userId, List<OrderItem> items) {
+        Set<String> experienceIds = new HashSet<>();
+        Set<String> poiIds = new HashSet<>();
+        for (OrderItem it : items) {
+            if (StringUtils.hasText(it.getExperienceId())) {
+                experienceIds.add(it.getExperienceId());
+            }
+            if (StringUtils.hasText(it.getPoiId())) {
+                poiIds.add(it.getPoiId());
+            }
+        }
+        if (experienceIds.isEmpty() && poiIds.isEmpty()) {
+            return CHANNEL_REPURCHASE;
+        }
+
+        LocalDateTime since = LocalDateTime.now().minusDays(TRIP_WINDOW_DAYS);
+
+        // 两个方向分开查，而不是拼一个 or 的 in：
+        // 集合为空时 `.in(col, emptySet)` 会生成 `IN ()`，那是非法 SQL，
+        // 而"只挂体验的商品"恰恰会让其中一个集合为空。分开写还顺带
+        // 让"命中的是体验还是产地"在排查时能分开打日志。
+        boolean visited = false;
+        if (!experienceIds.isEmpty()) {
+            visited = tripCheckinMapper.selectCount(Wrappers.<TripCheckin>lambdaQuery()
+                    .eq(TripCheckin::getUserId, userId)
+                    .ge(TripCheckin::getCheckinAt, since)
+                    .in(TripCheckin::getExperienceId, experienceIds)) > 0;
+        }
+        if (!visited && !poiIds.isEmpty()) {
+            visited = tripCheckinMapper.selectCount(Wrappers.<TripCheckin>lambdaQuery()
+                    .eq(TripCheckin::getUserId, userId)
+                    .ge(TripCheckin::getCheckinAt, since)
+                    .in(TripCheckin::getPoiId, poiIds)) > 0;
+        }
+
+        if (visited) {
+            log.info("[M6] 用户 {} 在 {} 天内有相关足迹，本单记为到访消费 TRIP", userId, TRIP_WINDOW_DAYS);
+            return CHANNEL_TRIP;
+        }
+        return CHANNEL_REPURCHASE;
     }
 
     /** 我的订单（含明细）。订单量不大，一次带全，省掉详情页的二次请求 */

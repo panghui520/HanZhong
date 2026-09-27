@@ -1,4 +1,4 @@
-import type { TripContext } from '@/types'
+import type { TripCheckin, TripContext } from '@/types'
 import { request } from './http'
 
 /**
@@ -55,4 +55,41 @@ export function selectTripHotel(hotel: {
  */
 export function clearTripHotel() {
   return request<TripContext>('/trips/current/hotel', { method: 'DELETE' })
+}
+
+// ----------------------------------------------------------------------
+// 到访足迹（M6 到访消费链）
+//
+// 与上面三个接口同属 `/api/trips/current/**`，**同样需要登录**。
+// 未登录调用会拿到 4001，所以调用方必须先判断登录态再调 ——
+// 在景点详情页上直接调，会把一个只是路过看看的游客弹到登录页去。
+// ----------------------------------------------------------------------
+
+/** 我的足迹，按到访时间倒序。服务端封顶（当前 100 条），不需要翻页 */
+export function listMyCheckins(limit?: number) {
+  const qs = limit ? `?limit=${limit}` : ''
+  return request<TripCheckin[]>(`/trips/current/checkins${qs}`)
+}
+
+/**
+ * 到访打卡。
+ *
+ * **只传 `poi_id` / `experience_id` / `note`，不传 `source`。**
+ * source 是"这条足迹是怎么来的"的标注：只有系统能说"这次到访是分流引导来的"。
+ * 由客户端传的话，任何人都能把自己点的足迹标成分流产物，
+ * 大屏上的"分流贡献量"就成了可以自己填的数。服务端会忽略这个键。
+ *
+ * 同一天对同一个目标重复打卡**不报错**，返回已有那条（幂等）——
+ * 用户点第二次通常是在确认"我是不是没点上"。
+ */
+export function createCheckin(payload: {
+  poi_id?: string
+  experience_id?: string
+  note?: string
+}) {
+  return request<TripCheckin>('/trips/current/checkins', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
 }

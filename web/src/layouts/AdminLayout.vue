@@ -3,6 +3,7 @@ import { ref } from 'vue'
 
 const menus = [
   { key: 'dashboard', label: '管理驾驶舱', to: '/admin/dashboard', icon: '◎' },
+  { key: 'risks', label: '风险与工单', to: '/admin/risks', icon: '⚠' },
   { key: 'orders', label: '订单处理', to: '/admin/orders', icon: '⇄' },
   { key: 'media', label: '图片管理', to: '/admin/media', icon: '▤' },
 ]

@@ -93,6 +93,21 @@ public class TripService {
     }
 
     /**
+     * 当前行程 id，没有就建一个（懒创建）。
+     *
+     * <p>给 M6 的足迹用：一次打卡要挂在"这次出行"上，否则足迹无法回答
+     * "哪几次到访属于同一次旅行"。与 {@link #current} 同一套懒创建逻辑，
+     * 不复制一遍 {@code ensureTrip} 的并发处理。
+     *
+     * <p>返回的是 id 而不是整个 VO：足迹那边只写一个外键列，
+     * 拿整个 VO 会顺带把 trip_context 也读一遍 —— 那是白读。
+     */
+    @Transactional
+    public Long ensureCurrentTripId(Long userId) {
+        return ensureTrip(userId).getId();
+    }
+
+    /**
      * 把某家酒店记为本次行程的住处。
      *
      * <p>提交的字段来自前端刚收到的那张高德卡片。这里**不做"这条 POI

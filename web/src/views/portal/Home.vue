@@ -4,6 +4,7 @@
  *
  * 节奏（自上而下，靠"尺寸 + 留白 + 字号层级"形成落差，而不是每区放同样大小的卡片）：
  *   1. 超大轮播 Hero（满屏，深色压图）
+ *   1.5 分流公告条（M5 续，有生效公告时才出现）
  *   2. 汉中精选目的地（大图主推 + 次级列表，左右不对称）
  *   3. AI 智能行程规划（浅色强调带，横向流程）
  *   4. 乡村体验（深绿整幅带，大留白）
@@ -16,12 +17,23 @@
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import PoiImage from '@/components/PoiImage.vue'
 import HeroCarousel from '@/components/HeroCarousel.vue'
+import DiversionNoticeBar from '@/components/DiversionNoticeBar.vue'
 import SectionHead from '@/components/SectionHead.vue'
 import { getCityPack } from '@/api/citypack'
 import { isEmpty, useAsync } from '@/composables/useAsync'
+import { useDiversionNotices } from '@/composables/useDiversionNotices'
 import type { Product } from '@/types'
 
 const { data, loading, error, reload } = useAsync(getCityPack)
+
+/**
+ * 分流公告（M5 续）。
+ *
+ * 用 `actionable` 而不是 `list`：**候选全满的公告不显示**。
+ * 一条"建议改往 A、B、C"而 A、B、C 现在都已不宽裕的提示，
+ * 对游客只是噪音；它该由运营撤下（运营列表会提示"该撤下了"）。
+ */
+const { actionable: diversionNotices } = useDiversionNotices()
 
 const scenics = computed(() => (data.value?.pois ?? []).filter((p) => p.business_type === 'SCENIC'))
 const rurals = computed(() =>
@@ -66,7 +78,7 @@ const stats = computed(() => [
 const flow = [
   { no: '01', title: '理解需求', desc: '天数、同行人群、步行意愿、兴趣偏好' },
   { no: '02', title: '召回候选', desc: '按行政区、类型、距离筛出可达资源池' },
-  { no: '03', title: '承载过滤', desc: '读取实时余量，高位点降权、闲时点前置' },
+  { no: '03', title: '承载过滤', desc: '读取当日余量，高位点降权、闲时点前置' },
   { no: '04', title: '生成行程', desc: 'LLM 只负责写成可读方案与推荐理由' },
 ]
 
@@ -145,6 +157,26 @@ onUnmounted(() => io?.disconnect())
   <div ref="root" class="home">
     <!-- ============ 1. 超大轮播 Hero ============ -->
     <HeroCarousel />
+
+    <!-- ============ 1.5 分流公告（M5 续） ============
+         排在 Hero 之后、所有内容之前：这是整站唯一一条"系统主动对游客说话"的
+         内容，埋到下半页等于没发。没有生效公告时整块不渲染，不留空占位。
+
+         多条同时生效（两个景区同时高位）时**叠成一列**，间距由这里的 grid
+         统一给。组件只吃一条 —— 两条公告的 expire_at / published_by 各自
+         独立，合并成一张大卡反而要在每段各写一次这些字段。
+         12px 的卡间距远小于它与下一区块的距离（下一区块是 section-xl，
+         上下各 128px），按接近性原则读起来是一组，而不是两张各说各话的公告。 -->
+    <section v-if="diversionNotices.length" class="dnbsec">
+      <div class="container dnbsec__stack">
+        <DiversionNoticeBar
+          v-for="n in diversionNotices"
+          :key="n.id"
+          :notice="n"
+          variant="band"
+        />
+      </div>
+    </section>
 
     <!-- ============ 2. 汉中精选目的地 ============ -->
     <section class="section-xl dest">
@@ -428,6 +460,23 @@ onUnmounted(() => io?.disconnect())
 </template>
 
 <style scoped>
+/* ============================================================
+   1.5 分流公告
+   ------------------------------------------------------------
+   组件本身只是一张卡（不含容器与上下留白），留白在这里给。
+   上 32px：公告要贴着 Hero，离得远就不像"当前正在发生的事"了。
+   下不设留白：紧接的 .dest 是 section-xl（上下各 128px），
+   那 128px 已经足够把两者分开，这里再加就成了双份间距。
+   ============================================================ */
+.dnbsec {
+  padding-top: var(--sp-6);
+}
+/* 多条叠放：卡间距 12px，让它们读成一组 */
+.dnbsec__stack {
+  display: grid;
+  gap: var(--sp-3);
+}
+
 /* ============================================================
    2. 汉中精选目的地 —— 左大右小，刻意不对称
    ============================================================ */

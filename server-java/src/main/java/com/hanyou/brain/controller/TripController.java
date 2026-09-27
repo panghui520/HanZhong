@@ -1,5 +1,6 @@
 package com.hanyou.brain.controller;
 
+import java.util.List;
 import java.util.Map;
 
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
@@ -8,13 +9,16 @@ import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import com.hanyou.brain.auth.AuthUser;
 import com.hanyou.brain.common.BizException;
 import com.hanyou.brain.common.ErrorCode;
 import com.hanyou.brain.common.Result;
+import com.hanyou.brain.service.TripCheckinService;
 import com.hanyou.brain.service.TripService;
+import com.hanyou.brain.vo.TripCheckinVO;
 import com.hanyou.brain.vo.TripContextVO;
 
 import lombok.RequiredArgsConstructor;
@@ -38,6 +42,7 @@ import lombok.RequiredArgsConstructor;
 public class TripController {
 
     private final TripService tripService;
+    private final TripCheckinService checkinService;
 
     /**
      * 当前行程。**没有就创建一个**（懒创建，见 TripService 类注释）。
@@ -76,6 +81,40 @@ public class TripController {
     @DeleteMapping("/current/hotel")
     public Result<TripContextVO> clearHotel(@AuthenticationPrincipal AuthUser me) {
         return Result.ok(tripService.clearHotel(uid(me)));
+    }
+
+    /**
+     * 我的足迹（M6 到访消费链），按到访时间倒序。
+     *
+     * <p>挂在 {@code /current/} 下而不是另开 {@code /api/checkins}：
+     * 足迹是"我的这次出行"的一部分，与已选酒店同一层级。分开之后
+     * 前端要维护两个"当前行程"的概念，而它们本该是同一个。
+     *
+     * <p>{@code limit} 可选，服务端封顶（见 {@code TripCheckinService.MAX_LIMIT}）——
+     * 足迹是复购推荐的输入，不是无限滚动的时间线，不需要翻页能力。
+     */
+    @GetMapping("/current/checkins")
+    public Result<List<TripCheckinVO>> checkins(@AuthenticationPrincipal AuthUser me,
+                                                @RequestParam(required = false) Integer limit) {
+        return Result.ok(checkinService.listMine(uid(me), limit));
+    }
+
+    /**
+     * 到访打卡。请求体只取 {@code poi_id} / {@code experience_id} / {@code note}。
+     *
+     * <p><b>刻意不接受 {@code source}。</b>它是"这条足迹是怎么来的"的标注：
+     * 只有系统能说"这次到访是我们分流引导来的"（{@code DIVERSION}）。
+     * 若由客户端传，任何人都能把自己点的足迹标成分流产物，
+     * 大屏上的"分流贡献量"就成了可以自己填的数 —— 而那一列存在的
+     * 全部意义就是它是系统判定出来的。对外接口恒写 {@code REAL}。
+     *
+     * <p>同一天对同一目标重复打卡**不报错**，返回已有那条（幂等）：
+     * 用户点第二次通常是在确认"我是不是没点上"，报错会让他以为失败了。
+     */
+    @PostMapping("/current/checkins")
+    public Result<TripCheckinVO> checkin(@AuthenticationPrincipal AuthUser me,
+                                         @RequestBody(required = false) Map<String, Object> body) {
+        return Result.ok(checkinService.checkin(uid(me), body == null ? Map.of() : body));
     }
 
     /**

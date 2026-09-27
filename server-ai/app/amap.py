@@ -272,6 +272,14 @@ class AmapClient:
     # ---- 底层 ----
 
     def _get(self, path: str, params: dict[str, Any]) -> dict[str, Any]:
+        """拼 `base_url + path` 发 GET。
+
+        ★ **`path` 不带 `/v3`**：`base_url` 默认就是 `https://restapi.amap.com/v3`
+        （见 `config.amap_base_url`）。写成 `/v3/xxx` 会拼出
+        `…/v3/v3/xxx`，高德**不报 404，而是回 `10002 SERVICE_NOT_AVAILABLE`** ——
+        看着像"这个 key 没开通该服务"，其实是路径错。本文件里所有调用都
+        按 `/geocode/geo`、`/place/text` 这种写法来。
+        """
         if not self.enabled:
             raise AmapError("未配置 AMAP_KEY，高德工具不可用")
 
@@ -322,6 +330,58 @@ class AmapClient:
             formatted=_s(first.get("formatted_address")),
             level=_s(first.get("level")),
         )
+
+    def direction_driving(
+        self,
+        origin: str,
+        destination: str,
+    ) -> dict[str, Any] | None:
+        """两点驾车路径规划（v3）。**只取第一条 path**。
+
+        入参 `origin` / `destination` 用 `"{lng},{lat}"` 字符串 —— 高德要求，
+        也方便上层复用 `places.PlaceResolver` 出来的坐标。`extensions=base`
+        只拿距离/时长，不取 polyline：
+        路径线本身要到前端画才有用，这里返回它只会撑大 JSON。
+
+        返回 None 表示**响应里根本没有 `route.paths`**（少见），区别于
+        `AmapError`（请求级错误：key 错、配额超、参数非法）。
+
+        ★ 2026-09-27 实测修正：**"跨城太远"不会返回 None，会抛 AmapError**。
+        汉中 → 东京 实测回 `20011 INSUFFICIENT_ABROAD_PRIVILEGES`（境外权限不足）；
+        坐标写成中文回 `20000 INVALID_PARAMS`。原先这里写"如跨城超出驾车服务范围"，
+        是没实测就下的结论。上层 `_get_route` 的 None 分支仍然保留 ——
+        它只是难造，不是不存在。
+        """
+        payload = self._get(
+            "/direction/driving",
+            {
+                "origin": origin,
+                "destination": destination,
+                "extensions": "base",
+                "strategy": "0",  # 0 = 推荐（默认耗时最短），不走躲避拥堵
+            },
+        )
+        route = payload.get("route")
+        if not isinstance(route, dict):
+            return None
+        paths = route.get("paths")
+        if not isinstance(paths, list) or not paths:
+            return None
+        first = paths[0]
+        if not isinstance(first, dict):
+            return None
+        try:
+            distance_m = int(first.get("distance")) if first.get("distance") is not None else None
+            duration_s = int(first.get("duration")) if first.get("duration") is not None else None
+        except (TypeError, ValueError):
+            return None
+        if distance_m is None or duration_s is None:
+            return None
+        return {
+            "distance_m": distance_m,
+            "duration_s": duration_s,
+            "strategy": _s(first.get("strategy")),
+        }
 
     def search_around(
         self,

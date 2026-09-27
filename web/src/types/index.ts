@@ -629,15 +629,52 @@ export interface Order {
  * 任一步出错则发 error 并结束。
  * ============================================================ */
 
-/** 已知工具名。`none` 表示"不需要工具，直接由模型回答" */
-export type AgentToolName = 'knowledge_search' | 'search_nearby' | 'search_poi' | 'none'
+/** 已知工具名。`none` 表示"不需要工具，直接由模型回答"。
+ *
+ *  ★ 后端加一个工具，这里就必须加一项 —— `AGENT_TOOL_LABEL` 用
+ *  `satisfies Record<AgentToolName, string>` 兜底，漏了标签**编译就不过**。
+ *  这个兜底是补上的：`get_route` 当初就是漏在这里，助手页上直接显示了
+ *  英文原名 `get_route`，而 SSE 事件里 `name: "get_route"` 看着完全正常 ——
+ *  **协议层看不出来，只有真浏览器里才看得见**（`probe_route_ui.mjs`）。
+ *  之前这里也漏了 `plan_itinerary`，一并补齐。 */
+export type AgentToolName =
+  | 'knowledge_search'
+  | 'search_nearby'
+  | 'search_poi'
+  | 'plan_itinerary'
+  | 'get_route'
+  | 'none'
 
+/**
+ * 工具名 → 中文标签。
+ *
+ * 声明成 `Record<string, string>` 是为了能直接用事件里的 `name: string` 去索引；
+ * 后面补一句 `satisfies` 只做**完整性检查**、不改类型 ——
+ * 于是"索引方便"和"漏项编译报错"两件事同时成立。
+ */
 export const AGENT_TOOL_LABEL: Record<string, string> = {
   knowledge_search: '本地知识库',
   search_nearby: '高德 · 附近搜索',
   search_poi: '高德 · 关键词搜索',
   plan_itinerary: '本地数据包 · 行程规划',
+  get_route: '高德 · 驾车路线',
   none: '直接回答',
+} satisfies Record<AgentToolName, string>
+
+/**
+ * 工具状态条右侧"条数"那一格用什么单位。
+ *
+ * - `'天'`：`plan_itinerary` 的 count 是**天数**，写成"返回 2 条"会让用户
+ *   以为只查到两个点。
+ * - `null`：这个工具的 count **没有"条数"这回事**，那一格不渲染。
+ *   `get_route` 就是这种 —— 路线没有"几条"，距离与时长在正文里。
+ *   漏了它就会渲染成 **"返回 0 条"**（它的 count 恒为 0）：
+ *   协议层看着完全正常，只有浏览器里才看得见。
+ * - 不在这张表里 = 按"条"算（搜索类工具）。
+ */
+export const AGENT_TOOL_COUNT_UNIT: Record<string, string | null> = {
+  plan_itinerary: '天',
+  get_route: null,
 }
 
 export interface AgentMetaEvent {
@@ -928,6 +965,34 @@ export interface TripContext {
 }
 
 /**
+ * 一条到访足迹（M6 到访消费链）。
+ *
+ * `poi_name` / `experience_name` 是**快照**，不是实时查出来的：
+ * `poi` 与 `experience` 表每次启动会被数据包重灌，只存 id 的话，
+ * 换一次数据包足迹就会指向另一个同名的点。所以这一页显示的名字
+ * 就是当时那个点的名字，不会跟着数据包变。
+ *
+ * `source` 三值：
+ *   REAL      用户自己点的打卡
+ *   SIM       演示种子（合成数据）
+ *   DIVERSION 分流引导产生的到访
+ * 中文名走 `source_label`（**服务端给**，前端不维护映射表 —— 漂移的后果
+ * 是界面上出现 `DIVERSION` 这种给机器看的字符串）。
+ */
+export interface TripCheckin {
+  id: number
+  /** 只打卡了体验项目时可能不出现（后端配了 non_null） */
+  poi_id?: string
+  poi_name?: string
+  experience_id?: string
+  experience_name?: string
+  checkin_at: string
+  source: string
+  source_label: string
+  note?: string
+}
+
+/**
  * 预订状态的中文。
  *
  * 当前只会出现 `not_booked` —— 本系统**不代办预订**，也不接美团/携程的
@@ -940,5 +1005,431 @@ export const HOTEL_BOOKING_LABEL: Record<string, string> = {
   external_pending: '已跳转第三方，待确认',
   booked: '已预订',
   cancelled: '已取消',
+}
+
+/* ============================================================
+ * M5 承载力与乡村分流
+ *
+ * 数据全部来自 `poi_visit_stats`（**合成数据**，`synthetic=true`），
+ * 由 `scripts/gen_synthetic.py` 生成、`CityPackImporter` 灌库。
+ * 界面上凡是显示这些数字的地方都要能看出是仿真值 ——
+ * 真实订单不混进来（那会让大屏数字随演示中的每次下单跳动）。
+ *
+ * 两档接口，别混用：
+ *   · `PoiStat`  ← `GET /api/stats/pois`        公开。给**游客端**看拥挤度
+ *   · `OpsSnapshot` / `RiskEvent` / `WorkOrder`
+ *                ← `/api/admin/ops/**` 等        运营端。给**管理端**看原始指标
+ * 游客端只给聚合后的承载率，不给原始客流。
+ *
+ * 同样受后端 `default-property-inclusion: non_null` 影响：
+ * 值为 null 的字段整个省略，前端拿到的是 undefined。
+ * ============================================================ */
+
+/**
+ * 一个资源点的当日承载情况。游客端（探索页 / 行程页 / 详情页）用它显示拥挤度。
+ *
+ * `has_data` 为 false 表示该资源点没有客流统计（数据包里没给它编数据）。
+ * **必须与"承载率为 0"区分开**：0% 是"很空"，没数据是"不知道"，
+ * 混成一种的话，界面上会把"不知道"显示成"舒适"，而这是两个完全不同的结论。
+ */
+export interface PoiStat {
+  poi_id: string
+  /** 承载占用率，0–1。**可以 >1**，表示超载（不是百分比，显示时 ×100） */
+  capacity_usage: number
+  today_visitors: number
+  /** 承载 >=80%。后端算好，前端不要自己拿 0.8 再判一次 */
+  high: boolean
+  /**
+   * 近 7 日客流，**不含今天**，按时间正序（最早在前）。
+   * 趋势图直接用这个数组，不要再拼今天。
+   */
+  week_visitors: number[]
+  has_data: boolean
+}
+
+/**
+ * 风险事件类型。**比 `rule_id` 粗一档** —— 六条规则归到这六类，
+ * 界面按 type 显示中文标签。见 `db/V8__m5_ops.sql` 的种子段。
+ */
+export type RiskType =
+  | 'OVERLOAD'
+  | 'RURAL_IDLE'
+  | 'CONVERSION'
+  | 'REVIEW'
+  | 'HEAT'
+  | 'REPURCHASE'
+
+/** 风险等级。阈值由 `risk_rule` 表配置，运营可以改 */
+export type RiskLevel = 'HIGH' | 'MID'
+
+/**
+ * 风险事件状态。
+ *   OPEN    刚命中，还没处置
+ *   HANDLED 已建工单（`work_order_id` 非空）
+ *   CLOSED  工单已完结
+ */
+export type RiskStatus = 'OPEN' | 'HANDLED' | 'CLOSED'
+
+/**
+ * 一条风险事件。
+ *
+ * `title` / `detail` / `suggestion` 都是**规则内置文案**，不含 LLM 生成内容
+ * （M7 接 AI 归因后由模型补充 suggestion）。所以界面上不要把它们标成"AI 建议"。
+ *
+ * `poi_name` 是命中当时的**快照**：资源点改名或下架后，历史事件仍要说得清是谁。
+ */
+export interface RiskEvent {
+  id: number
+  rule_id: string
+  type: RiskType
+  level: RiskLevel
+  title: string
+  poi_id: string
+  poi_name: string
+  district?: string
+  stat_date: string
+  /** 实际指标值。含义随规则变（承载率 / 占比 / 倍数） */
+  metric_value: number
+  /** 命中时的阈值快照。阈值后来被调过，历史事件仍说得清当时的判据 */
+  threshold: number
+  detail: string
+  suggestion: string
+  status: RiskStatus
+  /** 已建的工单 id。未建单时缺省 */
+  work_order_id?: number
+  /**
+   * 分流候选（M5 续）。**只有处置动作为 DIVERSION 的规则才有**：
+   * 其余规则没有"换一个去处"的语义，后端返回空数组。
+   * 空数组与"这条事件不涉及分流"是同一个意思，前端据此决定要不要显示这一块。
+   *
+   * 这些数是**打开时现算的**（依赖当日承载），不落库 ——
+   * 要看"当时为什么这么推荐"，看已发布公告里的快照。
+   */
+  candidates?: DiversionCandidate[]
+  created_at?: string
+}
+
+/** 工单状态。`PENDING` 未指派，`PROCESSING` 处置中，`DONE` 已完结 */
+export type WorkOrderStatus = 'PENDING' | 'PROCESSING' | 'DONE'
+
+/**
+ * 一张工单。
+ *
+ * `risk_rule_id` / `risk_poi_name` / `risk_stat_date` 是**关联字段**，
+ * 由后端 JOIN 出来。有了它们，工单列表不必再去拉一遍风险列表来查"这条单来自哪条风险"。
+ */
+export interface WorkOrder {
+  id: number
+  /** 对外单号，形如 WO-20260927-001 */
+  code: string
+  risk_event_id: number
+  risk_rule_id: string
+  risk_poi_name: string
+  risk_stat_date: string
+  title: string
+  type: RiskType
+  level: RiskLevel
+  status: WorkOrderStatus
+  assignee?: string
+  suggestion: string
+  /** 处置反馈。完结时必填 */
+  result?: string
+  handled_at?: string
+  created_at?: string
+}
+
+/**
+ * 运营快照（管理端大屏）。
+ *
+ * **全部来自仿真数据**，`synthetic` 恒为 true，界面上要标出来。
+ * 真实订单在运营端「订单处理」页看，不混进这块屏。
+ *
+ * `rural_sales_top` 是**乡村点级**销售额排行，不是产品级 ——
+ * 合成数据只支持到乡村点（见 OpsService 的口径说明）。
+ * 旧 mock 叫 productTop，换数据源时连同名字一起改了，
+ * 不留一个名叫 productTop 却装着乡村的字段。
+ */
+export interface OpsSnapshot {
+  /**
+   * 数据周期说明。**直接显示这个字符串**，不要前端自己拼一句话。
+   * 它同时说明了"哪些数是当日、哪些是近 7 日"—— 这块屏上两类混在一起。
+   */
+  period_label: string
+  synthetic: boolean
+
+  /**
+   * 当日**核心景区**到访人次。
+   * 不含乡村/餐饮/住宿/交通，也不是独立游客数（是人次）。
+   * 标签上必须写清，不要写成"全市到访"。
+   */
+  total_visitors: number
+  /** 当日乡村点到访人次 */
+  rural_visitors: number
+  /** 乡村占"核心景区 + 乡村"的比例，0–1。**不是**乡村占全市到访的比例 */
+  rural_ratio: number
+  /** 近 7 日农产品销售额 */
+  product_sales: number
+  /** 近 7 日离境复购率，0–1 */
+  repurchase_rate: number
+  /** 当前未闭环的风险事件数 */
+  open_risks: number
+
+  /** 近 7 日趋势。`date` 是"周一"这类星期名，直接当横轴标签 */
+  trend: { date: string; visitors: number; usage: number }[]
+  /** 当日到访的业态构成 */
+  mix: { name: string; value: number }[]
+  /** 按区县的冷热对比，单位是百分比数值（88 表示 88%） */
+  imbalance: { name: string; scenic: number; rural: number }[]
+  rural_sales_top: { name: string; sales: number }[]
+
+  /** 大屏右侧只展示这几条，已按"等级优先 + 类型多样"挑过 */
+  risks: RiskEvent[]
+  /** 承载 >=80% 的景区数 */
+  hot_scenic_count: number
+  /** 景区高位但乡村闲置的区县名 */
+  idle_districts: string[]
+  /** 乡村点平均承载占用率，0–1 */
+  rural_avg_usage: number
+
+  deltas: {
+    /** 到访人次环比，百分比数值 */
+    visitors_pct: number
+    /** 乡村占比环比，百分点 */
+    rural_ratio_pt: number
+    sales_pct: number
+    repurchase_pt: number
+  }
+}
+
+/** 风险类型中文标签。键是 `risk_rule.type`，**六条规则全覆盖** */
+export const RISK_TYPE_LABEL: Record<string, string> = {
+  OVERLOAD: '客流超载',
+  RURAL_IDLE: '乡村闲置',
+  CONVERSION: '转化偏低',
+  REVIEW: '差评激增',
+  HEAT: '热度跳变',
+  REPURCHASE: '复购衰减',
+}
+
+/** 风险状态中文标签 */
+export const RISK_STATUS_LABEL: Record<RiskStatus, string> = {
+  OPEN: '待处置',
+  HANDLED: '已建单',
+  CLOSED: '已闭环',
+}
+
+/** 工单状态中文标签 */
+export const WORK_ORDER_STATUS_LABEL: Record<WorkOrderStatus, string> = {
+  PENDING: '待认领',
+  PROCESSING: '处置中',
+  DONE: '已完结',
+}
+
+/* ============================================================
+ * M5 续：分流公告
+ *
+ * 补的是 M5 缺的最后一段用户可见闭环。M5 原本"规则命中 → 风险事件 → 工单"
+ * 全程只在管理端内部发生 —— 运营知道该分流了，但**要去这个景区的游客一无所知**。
+ * 分流公告把"往哪分流"变成一条游客能看到的提示。
+ *
+ * 数据来源分两截，**必须分清**：
+ *   · 候选点      ← 打开事件时现算（依赖当日承载）
+ *   · 已发布公告  ← `candidates_json` 里的**快照**，永远不变
+ * 所以公告上的候选有两组数：快照（发布那一刻）与当前（打开那一刻）。
+ * ============================================================ */
+
+/**
+ * 公告状态。
+ *   DRAFT      草稿。运营还在改文案，游客看不到
+ *   PUBLISHED  已发布。首页/详情页会显示
+ *   WITHDRAWN  运营主动撤下
+ *   EXPIRED    超过 `expire_at`，由扫描顺手置上
+ *
+ * **游客端只可能拿到 PUBLISHED**（服务端按 `expire_at > NOW()` 过滤），
+ * 运营端四个状态都能拿到。
+ */
+export type DiversionNoticeStatus = 'DRAFT' | 'PUBLISHED' | 'WITHDRAWN' | 'EXPIRED'
+
+/**
+ * 一个分流候选点。
+ *
+ * **★ 两组数不是冗余，是这张类型的理由：**
+ *   · 快照组 `km / usage / similarity / reason` —— 公告**发布那一刻**的指标。
+ *     作用只有一个：回答"当时为什么推荐它"。这几个数永远不变，
+ *     否则历史公告会被后来的数据改写。
+ *   · 当前组 `current_usage / available` —— **打开这一刻**重算的。
+ *     承载是日粒度、每天变的数，发布时说 B 村 23%，现在可能已经 90%。
+ * 只给快照等于拿旧数据骗游客；只给当前就答不出"为什么是它"。
+ * 两者都给，界面才能诚实地显示"推荐时 23%（当前 91%，已不建议前往）"。
+ *
+ * 没有"综合得分"字段：排序主键是**距离**（承载过半的整体后置），
+ * 挂一个不参与排序的分数在界面上只会招来"那为什么第二个分更高却排在后面"。
+ */
+export interface DiversionCandidate {
+  poi_id: string
+  name: string
+  /** `RURAL_SPOT` 乡村点 / `SCENIC` 景区。界面按这个分两组显示 */
+  business_type: string
+  district?: string
+
+  /** 距溢出点的距离（km）。地理距离不会变，所以这一项两组数是同一个值 */
+  km: number
+  /** 发布时的承载占用率，0–1 */
+  usage: number
+  /** 相似度 0–1。**不参与排序**，只用来解释"同「三国」主题" */
+  similarity: number
+  /** 一句可核对的理由：距离 + 承载 + 共同主题（或该点自己的主打） */
+  reason: string
+
+  /**
+   * 当前承载占用率。**缺省表示读不到**，不是 0 ——
+   * "不知道"和"很空"是两个结论，界面必须分开显示（用 `—`，不要显示 0%）。
+   */
+  current_usage?: number
+  /**
+   * 当前还能不能去。承载读不到时也是 false ——
+   * 无法确认"现在宽裕"，就不该让游客跑一趟。
+   */
+  available?: boolean
+}
+
+/**
+ * 一条分流公告。游客端与运营端共用，运营端多看到 DRAFT/WITHDRAWN/EXPIRED。
+ *
+ * `synthetic` **恒为 true** 且由后端给出，前端不要自己写死一个"仿真数据"徽标：
+ * 这条文案会被复制、会被截图，标注必须跟着数据源走。将来接入真实客流时
+ * 只改后端一处，全站一致。
+ */
+export interface DiversionNotice {
+  id: number
+  /** 对外编码，形如 DN-20260927-001 */
+  code: string
+  /** 来源风险事件。手工建的公告可能没有 */
+  risk_event_id?: number
+
+  /** 溢出的那个资源点（A 点） */
+  from_poi_id: string
+  from_poi_name: string
+  district?: string
+
+  title: string
+  message: string
+  status: DiversionNoticeStatus
+
+  /** 失效时间。游客端查询一律带 `expire_at > NOW()` */
+  expire_at: string
+  published_by?: string
+  published_at?: string
+  created_at?: string
+
+  candidates: DiversionCandidate[]
+  /** 当前仍可前往的候选数。为 0 表示这条公告该撤下了 */
+  available_count: number
+  synthetic: boolean
+}
+
+/** 公告状态中文标签 */
+export const NOTICE_STATUS_LABEL: Record<DiversionNoticeStatus, string> = {
+  DRAFT: '草稿',
+  PUBLISHED: '已发布',
+  WITHDRAWN: '已撤下',
+  EXPIRED: '已过期',
+}
+
+/**
+ * 分流候选上限，与后端 `DiversionAdvisor.TOTAL_MAX` 一致。
+ * 界面用它做"最多显示几个"的兜底，**不要**用它去截断后端返回的数组 ——
+ * 后端已经按乡村优先的名额分配算好了，前端再截一次会把乡村截掉。
+ */
+export const DIVERSION_MAX_CANDIDATES = 3
+
+/* ============================================================
+ * M7：AI 运营解读
+ *
+ * 与 M3/M4 的 AI 能力**不是同一类东西**，所以类型也不共用：
+ *   · M3/M4 是"用户问、AI 答"的对话，SSE 流式，内容是自由文本；
+ *   · M7 是"点一下、出一份解读"的报表动作，非流式，返回**结构化**结果。
+ * 三段正文只是结果的一部分，「依据」与「模式」同样是结果 ——
+ * 尤其「模式」，界面必须显示它是真调了模型还是回放了缓存。
+ * ============================================================ */
+
+/** 解读的一段。`kind` 是判别式，界面按它决定配色与图标 */
+export interface OpsAnalysisSection {
+  kind: 'fact' | 'why' | 'todo'
+  title: string
+  text: string
+}
+
+/**
+ * 「模型依据的是这些数」。
+ *
+ * **由后端代码算出，不由模型生成** —— 所以它可以、也应该被拿来对着面板核对。
+ * 如果让模型复述数字，它会顺手改写（84,529 写成"约 8.5 万"），
+ * 于是"依据"和面板上的数字对不上，而这一段存在的唯一意义就是能对上。
+ */
+export interface OpsAnalysisBasis {
+  label: string
+  value: string
+}
+
+/**
+ * 解读结果。
+ *
+ * `mode` 三态**必须区分显示**，这是本模块最重要的一条界面约束：
+ *   · `llm`          真的调了模型 —— 页脚署模型名
+ *   · `cache`        离线回放 —— 必须标明"回放"，否则就是把一段旧文本
+ *                    冒充成"刚生成的"
+ *   · `unavailable`  既没模型也没缓存，`sections` 为空、`note` 说明原因
+ *
+ * 不要因为 `sections` 为空就报错：那是正常的降级结果，界面照常展示 `note`。
+ */
+export interface OpsAnalysis {
+  focus: string
+  /** 维度中文名，**由后端给**。前端不要自己再维护一份映射去显示标题 */
+  focus_label: string
+  mode: 'llm' | 'cache' | 'unavailable'
+  /** 生成这段解读的模型名。离线回放时是缓存里记的那个 */
+  model: string
+  generated_at: string
+  /**
+   * 回放的数据与当前面板**不是同一批**。
+   * 为 true 时界面必须说明"回放的是 X 那批数据" —— 宁可口径说清楚，
+   * 也不要让一段过期数字冒充当前解读。
+   */
+  stale: boolean
+  /** 降级说明。`mode !== 'llm'` 时非空 */
+  note: string
+  period_label?: string
+  synthetic?: boolean
+  sections: OpsAnalysisSection[]
+  basis: OpsAnalysisBasis[]
+}
+
+/**
+ * 可解读的维度。
+ *
+ * **这份清单有三处**：本文件（界面能点哪几个）、后端
+ * `OpsAdminController.FOCUS_KEYS`（对外契约）、Python `ops_analysis.FOCUSES`
+ * （能力边界与标签）。三处都必须一致，不一致时各自都会**明确报错**
+ * （后端 3003 / Python 400），不会悄悄回落到总览。
+ *
+ * 标签在这里维护而不是从后端拉：点按钮**之前**就要显示中文名，
+ * 为此多开一个"列出维度"的接口不划算。而 `focus_label` 后端也会回，
+ * 用它渲染结果标题，两处对不上时一眼能看出来。
+ */
+export const OPS_FOCUSES: { key: string; label: string }[] = [
+  { key: 'overview', label: '运营总览' },
+  { key: 'trend', label: '客流与承载趋势' },
+  { key: 'mix', label: '业态客流构成' },
+  { key: 'imbalance', label: '冷热失衡' },
+  { key: 'sales', label: '乡村好物销售' },
+  { key: 'risks', label: '风险事件' },
+]
+
+/** 解读模式中文标签。`llm` 那一档不写"AI"，因为页脚会署真实模型名 */
+export const OPS_MODE_LABEL: Record<OpsAnalysis['mode'], string> = {
+  llm: '模型生成',
+  cache: '离线回放',
+  unavailable: '暂不可用',
 }
 

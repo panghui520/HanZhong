@@ -32,14 +32,23 @@ import PoiImage from '@/components/PoiImage.vue'
 import SectionHead from '@/components/SectionHead.vue'
 import { getCityPack } from '@/api/citypack'
 import { isEmpty, useAsync } from '@/composables/useAsync'
+import { LOAD_LEVEL_LABEL, usePoiStats } from '@/composables/usePoiStats'
 import { useReveal } from '@/composables/useReveal'
 import { BUSINESS_LABEL, BUSINESS_ORDER, type BusinessType, type Poi } from '@/types'
-import { capacityUsage } from '@/mock/stats'
 
 const route = useRoute()
 const router = useRouter()
 
 const { data, loading, error, reload } = useAsync(getCityPack)
+
+/**
+ * 承载力的全局单例（M5，来自 `/api/stats/pois`，合成客流）。
+ *
+ * 这里**不参与页面的 loading 状态**：客流读不到时页面照常展示资源列表，
+ * 只是承载位显示 "—"。把整页挂起来等一个次要指标，代价比收益大得多。
+ * 它也不会造成"先显示错的、再跳成对的"—— 取不到时显示的是"未知"而不是某个猜测值。
+ */
+const { usageOf, usageTextOf, levelOf } = usePoiStats()
 
 const root = ref<HTMLElement | null>(null)
 
@@ -151,6 +160,10 @@ const filtered = computed(
  *
  * 为什么按承载力选：这个页面要讲的主张是"承载力驱动分流"，
  * 把带 4A 头衔又最拥挤的那一条放在头条位置，页面自己就在陈述问题。
+ *
+ * 承载取不到时按 -1 参与排序（排到最后），**不是按 0**：
+ * 0 会让一个"读不到承载"的点看起来最空、反而更可能被选成头条，
+ * 而这条头条的全部意义就是"它最挤"。
  * ============================================================ */
 
 const featured = computed<Poi | null>(() => {
@@ -160,7 +173,7 @@ const featured = computed<Poi | null>(() => {
     const la = a.level === '4A' ? 1 : 0
     const lb = b.level === '4A' ? 1 : 0
     if (la !== lb) return lb - la
-    return capacityUsage(b.id, b.business_type) - capacityUsage(a.id, a.business_type)
+    return (usageOf(b.id) ?? -1) - (usageOf(a.id) ?? -1)
   })
   return ranked[0] ?? null
 })
@@ -235,18 +248,18 @@ const stats = computed(() => ({
 /* ---------- 交互 ---------- */
 
 function usage(p: Poi) {
-  return capacityUsage(p.id, p.business_type)
+  return usageOf(p.id)
 }
 function usageText(p: Poi) {
-  return `${Math.round(usage(p) * 100)}%`
+  return usageTextOf(p.id)
 }
 function usageLevel(p: Poi) {
-  const u = usage(p)
-  if (u >= 1) return 'danger'
-  if (u >= 0.8) return 'warn'
-  return 'ok'
+  return levelOf(p.id)
 }
-const LOAD_LABEL: Record<string, string> = { ok: '舒适', warn: '偏忙', danger: '拥挤' }
+/** 承载条的宽度。取不到承载时给 0 —— 与文字 "—" 一致，不画一根假的高度 */
+function usageWidth(p: Poi) {
+  return `${Math.min(usage(p) ?? 0, 1) * 100}%`
+}
 
 /** 清掉二级与三级筛选，但**不动类别** —— 类别是一级导航，不是筛选条件 */
 function clearSubFilters() {
@@ -294,7 +307,7 @@ function scrollToGrid() {
         <span class="eyebrow eyebrow--light">目的地探索 · 汉中</span>
         <h1 class="display exbanner__title">把一城资源<br />看成一张可以调度的网络</h1>
         <p class="exbanner__desc">
-          先按类别看：景点、乡村、餐饮、住宿、交通各自成一片。每一处都带着容量上限与实时占用率 ——
+          先按类别看：景点、乡村、餐饮、住宿、交通各自成一片。每一处都带着容量上限与当日占用率 ——
           这正是"把客流从拥挤处导向有余处"的依据。
         </p>
 
@@ -428,7 +441,7 @@ function scrollToGrid() {
               <div class="feat__foot">
                 <span class="feat__load" :class="`feat__load--${usageLevel(featured)}`">
                   <i class="feat__dot" />当前承载 {{ usageText(featured) }} ·
-                  {{ LOAD_LABEL[usageLevel(featured)] }}
+                  {{ LOAD_LEVEL_LABEL[usageLevel(featured)] }}
                 </span>
                 <span class="feat__more">查看详情 →</span>
               </div>
@@ -498,7 +511,7 @@ function scrollToGrid() {
                 />
                 <span class="pcard__kind">{{ BUSINESS_LABEL[p.business_type] }}</span>
                 <span class="pcard__load" :class="`pcard__load--${usageLevel(p)}`">
-                  {{ LOAD_LABEL[usageLevel(p)] }}
+                  {{ LOAD_LEVEL_LABEL[usageLevel(p)] }}
                 </span>
               </div>
               <div class="pcard__body">
@@ -519,7 +532,7 @@ function scrollToGrid() {
                   <div class="load__bar">
                     <i
                       :class="`load__fill load__fill--${usageLevel(p)}`"
-                      :style="{ width: Math.min(usage(p), 1) * 100 + '%' }"
+                      :style="{ width: usageWidth(p) }"
                     />
                   </div>
                 </div>
@@ -885,6 +898,13 @@ function scrollToGrid() {
 .feat__load--danger {
   color: #e79c88;
 }
+/* 承载读不到（客流接口未就绪 / 该点位没编数据）。
+   刻意做成中性灰：既不能说"舒适"，也不能说"拥挤"，所以不借用任何一侧的颜色。
+   写成显式样式而不是让它落回基类，是为了让"这一档存在"在代码里看得见 ——
+   否则下一个人会以为只是漏了。 */
+.feat__load--unknown {
+  color: var(--ink-500);
+}
 .feat__more {
   font-size: var(--fs-sm);
   font-weight: 500;
@@ -1044,6 +1064,12 @@ function scrollToGrid() {
   background: rgba(168, 64, 43, 0.8);
   border: 1px solid rgba(255, 255, 255, 0.26);
 }
+/* 承载未知：中性灰，不表态（理由同 .feat__load--unknown） */
+.pcard__load--unknown {
+  color: #eef3f0;
+  background: rgba(60, 70, 66, 0.72);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+}
 .pcard__body {
   padding: var(--sp-5);
   display: flex;
@@ -1108,6 +1134,10 @@ function scrollToGrid() {
 .load__val--danger {
   color: var(--danger);
 }
+/* 承载未知：中性灰（理由同 .feat__load--unknown） */
+.load__val--unknown {
+  color: var(--ink-500);
+}
 .load__bar {
   margin-top: 5px;
   height: 4px;
@@ -1129,6 +1159,10 @@ function scrollToGrid() {
 }
 .load__fill--danger {
   background: var(--danger);
+}
+/* 承载未知：宽度本来就是 0，这里给个中性色是为了"这一档存在"在代码里可见 */
+.load__fill--unknown {
+  background: var(--ink-500);
 }
 
 /* 深色底上的描边 tag */

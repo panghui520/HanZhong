@@ -101,10 +101,62 @@ public class AiClient {
 
     /** 通用的 GET，取回原始 JSON。失败一律返回 null，由调用方决定怎么降级 */
     private String getJson(String path) {
-        HttpRequest request = baseRequest(path).GET().build();
+        HttpRequest request = baseRequest(path, "application/json").GET().build();
         try {
             HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
             if (response.statusCode() != 200) {
+                log.warn("[AI] {} 返回 HTTP {}：{}", path, response.statusCode(), response.body());
+                return null;
+            }
+            return response.body();
+        } catch (IOException | InterruptedException e) {
+            if (e instanceof InterruptedException) {
+                Thread.currentThread().interrupt();
+            }
+            log.warn("[AI] {} 不可达：{}", path, e.getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * 通用 POST，一次性收完响应体并返回原始 JSON。失败返回 null，由调用方决定降级。
+     *
+     * <p>与 {@link #streamQuestion} 的分工：那个把响应体当 SSE **逐行**回吐，
+     * 这个**收完再返回**。M7 的运营分析是"点一下出一个结论"的报表动作，
+     * 结果是一个完整对象（三段正文 + 依据 + 模式），流式只会让调用方
+     * 自己把碎片再拼回来，多一层出错机会。
+     *
+     * <p>参数收 {@code Object} 而不是具体的请求体类型：这一层的职责是**管道**，
+     * 不是契约。请求体形状会随模块变，管道不该跟着改。与 {@link #health()}
+     * 返回原始字符串是同一个理由。
+     *
+     * @param path    形如 {@code /ai/analyze/ops}
+     * @param payload 会被 Jackson 按全局 snake_case 序列化的请求体对象
+     * @return 上游的 JSON 响应体；服务不可用或返回非 200 时返回 null
+     */
+    public String postJson(String path, Object payload) {
+        String body;
+        try {
+            body = objectMapper.writeValueAsString(payload);
+        } catch (JsonProcessingException e) {
+            // 走到这里说明是**我们自己**的对象序列化不了（循环引用、缺 getter），
+            // 不是网络问题。这类错误只在开发期出现，所以必须留下日志而不是静默返回 null
+            log.warn("[AI] {} 请求体序列化失败：{}", path, e.getMessage());
+            return null;
+        }
+
+        HttpRequest request = baseRequest(path, "application/json")
+                .header("Content-Type", "application/json; charset=utf-8")
+                .timeout(Duration.ofSeconds(properties.getAi().getReadTimeoutSeconds()))
+                .POST(HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8))
+                .build();
+
+        try {
+            HttpResponse<String> response =
+                    client.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+            if (response.statusCode() != 200) {
+                // 连响应体一起打：Python 的 400 里带着具体原因（"缺少 metrics"、
+                // "未知的 focus"），只记状态码等于把唯一的线索丢掉
                 log.warn("[AI] {} 返回 HTTP {}：{}", path, response.statusCode(), response.body());
                 return null;
             }
@@ -162,7 +214,7 @@ public class AiClient {
         HanYouProperties.Ai ai = properties.getAi();
         String payload = buildPayload(question, context);
 
-        HttpRequest request = baseRequest(path)
+        HttpRequest request = baseRequest(path, "text/event-stream")
                 .header("Content-Type", "application/json; charset=utf-8")
                 .timeout(Duration.ofSeconds(ai.getReadTimeoutSeconds()))
                 .POST(HttpRequest.BodyPublishers.ofString(payload, StandardCharsets.UTF_8))
@@ -193,12 +245,20 @@ public class AiClient {
         }
     }
 
-    private HttpRequest.Builder baseRequest(String path) {
+    /**
+     * 统一的请求构造。`Accept` 按端点类型分开传，不写死。
+     *
+     * <p>原来这里硬编码 {@code Accept: text/event-stream}，对三个流式端点是对的，
+     * 但 M7 的非流式端点也复用它 —— 一个 JSON 端点声称自己只接受 SSE，
+     * 在有内容协商的代理后面可能被改写成"缓冲到结束再返回"。
+     * 与其让每个新端点自己覆盖一次头，不如把差异提成参数。
+     */
+    private HttpRequest.Builder baseRequest(String path, String accept) {
         HanYouProperties.Ai ai = properties.getAi();
         return HttpRequest.newBuilder()
                 .uri(URI.create(ai.getBaseUrl() + path))
                 .header("X-Internal-Token", ai.getInternalToken())
-                .header("Accept", "text/event-stream");
+                .header("Accept", accept);
     }
 
     /**

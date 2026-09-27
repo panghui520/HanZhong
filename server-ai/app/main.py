@@ -26,6 +26,12 @@ from .corpus import build_chunks
 from .embed import create_embedder
 from .lexical import warm_up
 from .llm import AnswerCache
+from .ops_analysis import (
+    DEFAULT_FOCUS,
+    FOCUSES,
+    OpsAnalysisCache,
+    analyze as analyze_ops_metrics,
+)
 from .qa import QaService
 from .store import IDF_FILE, KbStore
 
@@ -98,6 +104,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     state["agent"] = (
         AgentService(settings, state["store"], state["amap"]) if "store" in state else None
     )
+    # M7 的运营解读**不依赖知识库**，所以无条件创建：
+    # 它读的是 Java 侧算好的指标，与向量库、语料都无关。
+    # 知识库没建好时它照样能用，这比"整块功能跟着知识库一起消失"好排查。
+    state["ops_cache"] = OpsAnalysisCache(settings.cache_file.parent / "ops_demo.json")
 
     logger.info(
         "[AI] 工具就绪：高德=%s 模型=%s",
@@ -137,6 +147,11 @@ def _agent_service(request: Request) -> AgentService:
         detail = request.app.state.ctx.get("load_error", "知识库不可用")
         raise HTTPException(status_code=503, detail=detail)
     return service
+
+
+def _ops_cache(request: Request) -> OpsAnalysisCache:
+    """M7 的缓存。**不依赖知识库**，所以不参与上面那两个 503 分支。"""
+    return request.app.state.ctx["ops_cache"]
 
 
 @app.get("/ai/health")
@@ -269,4 +284,43 @@ async def agent(request: Request, _: None = Depends(require_token)) -> Streaming
         _agent_service(request).stream(
             question, context if isinstance(context, dict) else None
         )
+    )
+
+
+@app.post("/ai/analyze/ops")
+async def analyze_ops(request: Request, _: None = Depends(require_token)) -> dict[str, Any]:
+    """M7 运营分析：把 Java 侧算好的指标解读成三段式。
+
+    **非流式**，与 `/ai/qa`、`/ai/agent` 不同：那两个是"边生成边看"的对话，
+    这里是"点一下出一个结论"的报表动作。非流式才能让响应带上一份**完整的**
+    结构化结果（三段正文 + 依据 + 模式 + 是否回放），前端一次拿到就能渲染，
+    不需要自己把 SSE 碎片拼成对象。
+
+    请求体：
+
+        {"focus": "imbalance",
+         "metrics": { ...Java 的 OpsSnapshotVO... }}
+
+    `metrics` **必填且必须非空**：这个接口不做任何取数，它只解读送进来的指标。
+    收下空指标然后返回一段"什么都分析不了"的正文，比直接报 400 更难查 ——
+    调用方会以为是模型不行，实际是自己没传数据。
+
+    `focus` 必须是已知关注点。未知值**报 400 而不是悄悄回落到总览**：
+    回落会让前端点了"销售"却拿到总览解读，而且没有任何迹象说明哪里错了。
+    """
+    body = await _body_of(request)
+    metrics = body.get("metrics")
+    if not isinstance(metrics, dict) or not metrics:
+        raise HTTPException(
+            status_code=400,
+            detail="缺少 metrics：本接口只解读调用方算好的指标，不做取数",
+        )
+    focus = str(body.get("focus") or DEFAULT_FOCUS)
+    if focus not in FOCUSES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"未知的 focus：{focus}（可用：{'、'.join(FOCUSES)}）",
+        )
+    return await analyze_ops_metrics(
+        request.app.state.ctx["settings"], focus, metrics, _ops_cache(request)
     )

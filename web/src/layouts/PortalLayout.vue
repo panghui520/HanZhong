@@ -170,6 +170,38 @@ async function logout() {
           </router-link>
 
           <!--
+            我的足迹（M6 到访消费链）。只在登录后显示，与订单同理。
+            **刻意不带角标**：足迹不像待付款订单那样"有事要办"，
+            给它一个数字会让人以为"还有 X 条没处理"，而它只是记录。
+            没有数字也就不需要额外一次请求。
+          -->
+          <router-link
+            v-if="session.isLoggedIn"
+            to="/footprints"
+            class="nav__orders"
+            title="我的足迹"
+          >
+            <svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true">
+              <path
+                d="M12 21s6.5-5.6 6.5-10.3A6.5 6.5 0 0 0 5.5 10.7C5.5 15.4 12 21 12 21Z"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.7"
+                stroke-linejoin="round"
+              />
+              <circle
+                cx="12"
+                cy="10.4"
+                r="2.4"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.7"
+              />
+            </svg>
+            <span class="nav__orders-label">我的足迹</span>
+          </router-link>
+
+          <!--
             购物车入口（M6）。只在登录后显示：
             未登录时点进去也只是一个"请登录"的空壳，不如先让他看到登录入口。
             角标数字来自服务端 /api/cart/count，不在本地猜。

@@ -9,6 +9,7 @@ import { useSessionStore } from '@/stores/session'
 import { clearAgentTurns, loadAgentTurns, saveAgentTurns } from '@/utils/agentChat'
 import { inlineText } from '@/utils/format'
 import {
+  AGENT_TOOL_COUNT_UNIT,
   AGENT_TOOL_LABEL,
   HOTEL_BOOKING_LABEL,
   QA_DOC_TYPE_LABEL,
@@ -16,6 +17,7 @@ import {
   type AgentCard,
   type AgentItineraryDay,
   type AgentSourceCard,
+  type AgentToolEvent,
   type AgentTurn,
   type TripContext,
 } from '@/types'
@@ -411,6 +413,26 @@ function sceneOf(kind: string) {
   return SCENE_BY_KIND[kind] ?? 'qinling'
 }
 
+/**
+ * 工具状态条右侧"条数"那一格的文案。**空串 = 不渲染**（模板的 `v-if` 挡掉）。
+ *
+ * 为什么不能只看 `count != null`：`get_route` 的 count 恒为 **0**
+ * （路线没有"几条"这回事，距离与时长在正文里），只看 count 就会渲染成
+ * **"返回 0 条"**。这个错**协议层完全看不出来** —— SSE 事件里
+ * `{"name":"get_route","status":"done","count":0}` 每一项都合法，
+ * 只有真浏览器里才看得见（`probe_route_ui.mjs`）。
+ *
+ * 单位表在 `types` 里（`AGENT_TOOL_COUNT_UNIT`），加工具时跟着一起加。
+ * 这里按 `tool.name` 分流而不是 `t.cardKind`：`name` 在 tool 事件里就有，
+ * 不必等 cards 事件到了才显示对，也就没有"先显示错再改对"的一帧。
+ */
+function countMeta(tool: AgentToolEvent): string {
+  if (tool.count == null) return ''
+  const unit = AGENT_TOOL_COUNT_UNIT[tool.name]
+  if (unit === null) return ''
+  return unit ? `共 ${tool.count} ${unit}` : `返回 ${tool.count} 条`
+}
+
 // ---------------------------------------------------------- 来源卡片（知识库分支）
 
 /** 文档类型中文名。表在 types 里，与知识问答页共用一份 */
@@ -656,13 +678,14 @@ async function copyAddress(card: AgentCard) {
             >
               <span class="tstep__icon" />
               <span class="tstep__label">{{ t.tool.label }}</span>
-              <span v-if="t.tool.status === 'done' && t.tool.count != null" class="tstep__meta">
-                <!--
-                  行程工具返回的 count 是**天数**，不是条数。写成"返回 2 条"会让
-                  用户以为只查到两个点。这里按 cardKind 分流：cards 事件在 tool
-                  事件之后到，到了会触发重渲染，所以这一格能跟着改对。
-                -->
-                {{ t.cardKind === 'itinerary' ? `共 ${t.tool.count} 天` : `返回 ${t.tool.count} 条` }}
+              <!--
+                "条数"那一格：文案与"要不要显示"都由 `countMeta` 决定。
+                行程的 count 是**天数**（写成"返回 2 条"会让用户以为只查到两个点），
+                路线的 count 恒为 0 且没有"条数"含义（显示成"返回 0 条"是错的）
+                —— 两种都写在 `AGENT_TOOL_COUNT_UNIT` 里，别在这里就地判断。
+              -->
+              <span v-if="t.tool.status === 'done' && countMeta(t.tool)" class="tstep__meta">
+                {{ countMeta(t.tool) }}
               </span>
               <span v-else-if="t.tool.status === 'error'" class="tstep__meta tstep__meta--err">
                 {{ t.tool.error || '调用失败' }}

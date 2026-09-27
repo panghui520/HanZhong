@@ -39,6 +39,7 @@ from .amap import (
     TYPES_TRANSPORT,
     AmapError,
     AmapPoi,
+    GeoPoint,
 )
 # 行程规划的产物类型。只 import 数据类型（纯 dataclass），不 import 执行逻辑 ——
 # 规划算法在 `itinerary.py`，这里只负责把它的结果**翻译**成给模型看的文本
@@ -57,6 +58,7 @@ TOOL_KNOWLEDGE = "knowledge_search"
 TOOL_NEARBY = "search_nearby"
 TOOL_POI = "search_poi"
 TOOL_PLAN = "plan_itinerary"
+TOOL_ROUTE = "get_route"
 TOOL_NONE = "none"
 
 # 关键词 -> 类型码的兜底推断。
@@ -112,6 +114,16 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
         args_hint='{"days": 天数（整数，如 2）, "preference": "偏好，可省略（自然风光 / 历史文化 / 亲子）"}',
         # **不需要高德**：它读的是数据包里的资源点，不联网。所以高德没配时
         # 行程规划仍然可用 —— 这也是"断网也能演示"的一环。
+    ),
+    ToolSpec(
+        name=TOOL_ROUTE,
+        title="查询两个地点之间的驾车路线（距离 / 时长）",
+        # **不取 polyline**：路径线要前端画才有用，返回它只会撑大 JSON。
+        # 上层 `_get_route` 内部用 `places.PlaceResolver` 解析地名，再调高德
+        # `/v3/direction/driving`。所以即使一端是高德数据库里的现成地点
+        # （"汉中博物馆"），也能算出 —— 不必先 `search_poi` 拿坐标。
+        args_hint='{"from": "起点地名", "to": "终点地名"}',
+        needs_amap=True,
     ),
 )
 
@@ -666,6 +678,138 @@ def _plan_itinerary(
 
 
 # ----------------------------------------------------------------------
+# get_route —— 两点驾车路径规划（M4 第三段）
+#
+# 不像 `search_nearby` / `search_poi` 那样返回一组候选点 —— 它返回的是
+# 一个**单一事实**："从 A 到 B 自驾多远 / 多久"。模型拿到这串数字就能
+# 给游客一段具体答复（"汉中站到青木川古镇自驾约 280 公里，约 4 小时"）。
+#
+# 为什么用 `PlaceResolver` 而不是直接 `amap.geocode`：
+# `places.py` 是**三档校验**（本地高德 POI 表 → 高德 /place/text → 高德 /geocode/geo），
+# 单 `geocode` 对「汉中高铁站」这类口语地名命中率很低。复用同一个 resolver
+# 与 `search_nearby` 的输入解析口径一致 —— "汉中站" 在前端能搜到的地方，
+# 在路线工具里也能算 —— 这是同一件事，不该有两套解析。
+# ----------------------------------------------------------------------
+def _get_route(
+    args: dict[str, Any],
+    *,
+    amap,
+    resolver,
+    city_name: str,
+) -> ToolResult:
+    from_name = str(args.get("from") or "").strip()
+    to_name = str(args.get("to") or "").strip()
+    if not from_name or not to_name:
+        return ToolResult(
+            name=TOOL_ROUTE,
+            kind="route",
+            error="get_route 需要 from 与 to 两个地名都不能为空",
+        )
+
+    label = f"正在算「{from_name}」到「{to_name}」的驾车路线…"
+
+    def _resolve(name: str) -> GeoPoint | None:
+        """解析地名 → 坐标。**与 `search_nearby` 同一口径**：本地地名表优先，
+        查不到再走高德地理编码。解析失败返回 None。
+
+        ★ 2026-09-27 实测修正（这一处曾被 mock 骗过，见下）：
+        原来写的是 `resolver.resolve(name, city=city_name)` 并读 `resolved.point`，
+        **两处都与真实契约不符** ——
+
+          · `PlaceResolver.resolve(query)` 只有一个位置参数，**没有 `city`**；
+            传了抛 TypeError。
+          · 它返回的 `ResolvedPlace` 坐标在 `.lng` / `.lat`（还有 `.location`
+            属性给出 `"lng,lat"`），**没有 `.point`**。
+
+        两处错误都被下面的 `except Exception` 吞掉、静默降级到 `amap.geocode`，
+        于是**"本地表优先"这一档从来没生效过**。后果不是崩，而是悄悄变差：
+        `places.py` 里记着"本模块历史上最贵的一处修复"—— 高德地理编码对
+        「汉中高铁站」返回的首条是「洋县高铁站(公交站)」。本地表优先正是为了
+        避开它；这一档死了，就等于那个 bug 又回来了。
+
+        为什么 `accept_m4_route.py` 当时全绿：那个脚本里的 `_FakeResolver`
+        自己编了 `city=` 参数、自己编了 `.point` 字段 —— **假对象比真对象"宽容"，
+        测试就把错误的契约固化了下来**。现在假对象已按真实签名重写，
+        并加了一条"本地表必须赢过高德"的断言，这类错下次会被抓住。
+        """
+        if resolver is not None:
+            try:
+                resolved = resolver.resolve(name)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("get_route: resolver 解析「%s」失败: %s", name, exc)
+                resolved = None
+            if resolved is not None:
+                return GeoPoint(lng=resolved.lng, lat=resolved.lat)
+        try:
+            return amap.geocode(name, city=city_name)
+        except AmapError:
+            return None
+
+    from_pt = _resolve(from_name)
+    to_pt = _resolve(to_name)
+    if from_pt is None or to_pt is None:
+        missing = [n for n, p in ((from_name, from_pt), (to_name, to_pt)) if p is None]
+        return ToolResult(
+            name=TOOL_ROUTE,
+            kind="route",
+            label=label,
+            error=f"这些地名高德数据库里没找到坐标：{', '.join(missing)}（换个更具体的写法试试）",
+        )
+
+    # 用 `GeoPoint.location`（`"lng,lat"`，六位小数）而不是自己拼 ——
+    # `search_nearby` 也是这么给高德的，两边格式保持一致。
+    origin = from_pt.location
+    destination = to_pt.location
+    try:
+        info = amap.direction_driving(origin=origin, destination=destination)
+    except AmapError as exc:
+        return ToolResult(
+            name=TOOL_ROUTE,
+            kind="route",
+            label=label,
+            error=f"高德路径规划失败：{exc}",
+        )
+    if info is None:
+        # 少见分支：高德 status=1 但 route.paths 为空。
+        # ★ 别在这句里写"跨城太远" —— 实测跨到境外回的是 AmapError 20011，
+        # 走的是上面那条分支（见 amap.direction_driving 的注释）。
+        return ToolResult(
+            name=TOOL_ROUTE,
+            kind="route",
+            label=label,
+            error="高德返回了空结果（这条起终点之间没有规划出驾车路线）",
+        )
+
+    distance_km = info["distance_m"] / 1000.0
+    duration_min = round(info["duration_s"] / 60)
+    hours, mins = divmod(duration_min, 60)
+    if hours > 0 and mins > 0:
+        duration_text = f"约 {hours} 小时 {mins} 分钟"
+    elif hours > 0:
+        duration_text = f"约 {hours} 小时"
+    else:
+        duration_text = f"约 {mins} 分钟"
+
+    text = (
+        f"从「{from_name}」到「{to_name}」自驾 {distance_km:.1f} 公里，"
+        f"{duration_text}（高德驾车规划）"
+    )
+    return ToolResult(
+        name=TOOL_ROUTE,
+        kind="route",
+        label=label,
+        # 只给 text，不下发 cards。理由：路径线要前端画才有用，没画就只是一个
+        # "{from} → {to}" 的两行字 + 一个距离数字，与 text 重复。让前端只在
+        # 回答正文里展示 —— 与 `tool_count_text` 的 "返回 N 条" 不冲突（kind=route
+        # 时 `count` 留 0，scene 不去查）。
+        cards=[],
+        text=text,
+        # 给前端 cardKind 一个稳定值，便于后续扩展时按 kind 分流渲染。
+        # 现在 kind=route 没有专门卡片模板，下发空数组即可，渲染不会出错。
+    )
+
+
+# ----------------------------------------------------------------------
 # 入口
 # ----------------------------------------------------------------------
 
@@ -726,6 +870,15 @@ def execute(
                 hotel=hotel,
             )
         return _search_poi(args, amap=amap, city_name=city_name)
+
+    if name == TOOL_ROUTE:
+        if not amap.enabled:
+            return ToolResult(
+                name=TOOL_ROUTE,
+                kind="route",
+                error="本机未配置高德地图（AMAP_KEY），算不了真实路线",
+            )
+        return _get_route(args, amap=amap, resolver=resolver, city_name=city_name)
 
     return ToolResult(
         name=name, kind="none", error=f"没有名为「{name}」的工具"

@@ -17,14 +17,17 @@
 import { computed, ref } from 'vue'
 import { getCityPack } from '@/api/citypack'
 import { isEmpty, useAsync } from '@/composables/useAsync'
+import { usePoiStats } from '@/composables/usePoiStats'
 import { useReveal } from '@/composables/useReveal'
 import SceneArt from '@/components/SceneArt.vue'
 import PoiImage from '@/components/PoiImage.vue'
 import SectionHead from '@/components/SectionHead.vue'
 import { BUSINESS_LABEL, type Experience, type Poi, type Product } from '@/types'
-import { capacityUsage } from '@/mock/stats'
 
 const { data, loading, error, reload } = useAsync(getCityPack)
+
+/** 承载力（M5，真实数据，来自 /api/stats/pois）。见下方 score() 对"取不到"的处理 */
+const { usageOf } = usePoiStats()
 
 const root = ref<HTMLElement | null>(null)
 
@@ -86,8 +89,15 @@ function perDayHint(p: string) {
 }
 
 /** 承载率 → 展示档位。danger 是刻意保留的：超载样本要看得见 */
-function loadLv(u: number) {
+/** 承载档位。`unknown` 与 `ok` 必须分开：把"读不到"归成"舒适"是个错误的结论 */
+function loadLv(u: number | undefined) {
+  if (u == null) return 'unknown'
   return u >= 1 ? 'danger' : u >= 0.8 ? 'warn' : 'ok'
+}
+
+/** 承载文案。取不到时给 "—"，**不要显示成 0%**（那是"很空"，是另一个结论） */
+function usageText(u: number | undefined) {
+  return u == null ? '—' : `${Math.round(u * 100)}%`
 }
 
 /* ============================================================
@@ -127,10 +137,15 @@ function matchScore(p: Poi) {
  *
  * 承载力**加权为正**：余量越充足越优先 —— 这正是"把客流导向有余处"的规则化表达。
  * 注意这与"景点越热门越靠前"是相反的逻辑，是刻意的。
+ *
+ * 承载取不到时余量记 0（即**不给这份加分，也不倒扣**）：
+ * 若按"未知 = 空"来算，一个读不到承载的点会拿到满额加分、被排到最前，
+ * 而这条加分的全部依据恰恰是"它当前有余量"。宁可退化成"只按匹配度排"，
+ * 也不要让一个没有依据的假设支配排序。
  */
 function score(p: Poi) {
-  const usage = capacityUsage(p.id, p.business_type)
-  const headroom = Math.max(0, 1 - usage) // 余量
+  const usage = usageOf(p.id)
+  const headroom = usage == null ? 0 : Math.max(0, 1 - usage)
   return matchScore(p) * 0.72 + headroom * 0.28
 }
 
@@ -162,7 +177,8 @@ type Stop = {
   why: string
   /** 该点命中的兴趣标签，用于展示"为什么推荐给你" */
   hits: string[]
-  usage: number
+  /** 生成这一版方案时的承载占用率。**取不到时为 undefined**（见 reasonFor） */
+  usage?: number
   duration: number
   ticket: number
   scene: string
@@ -212,7 +228,7 @@ const plan = computed<{ day: number; stops: Stop[] }[]>(() => {
     if (!p) continue
 
     const isRural = p.business_type === 'RURAL_SPOT'
-    const usage = capacityUsage(p.id, p.business_type)
+    const usage = usageOf(p.id)
 
     // 乡村点找它挂的体验（第一条），再顺着体验找农产品
     const exp = isRural ? (exps.find((e) => e.poi_id === p.id) ?? null) : null
@@ -244,11 +260,24 @@ const plan = computed<{ day: number; stops: Stop[] }[]>(() => {
 })
 
 /** 推荐理由：从数据算，不是写死的句式 —— 每种情况都对应一个真实判定 */
-function reasonFor(p: Poi, usage: number, isRural: boolean, idx: number): string {
+/**
+ * 这一站为什么排在这儿。
+ *
+ * 承载那一句在**取不到承载时不写**：这句是"为什么排它在这里"的理由，
+ * 编一句"余量充足"比不说更糟 —— 用户会照着一个没有依据的结论安排行程。
+ * 但也不能整段空着（后半段拼出来会是个孤零零的句号），所以给一句可执行的话。
+ */
+function reasonFor(p: Poi, usage: number | undefined, isRural: boolean, idx: number): string {
   const parts: string[] = []
-  if (usage >= 1) parts.push(`当前承载 ${Math.round(usage * 100)}% 已超载，安排在此可避开高峰`)
-  else if (usage >= 0.8) parts.push(`承载 ${Math.round(usage * 100)}% 偏高，建议错开午后时段`)
-  else parts.push(`承载 ${Math.round(usage * 100)}%，余量充足，无需排队`)
+  if (usage == null) {
+    parts.push('该点当日承载暂未获取，建议出行前再确认')
+  } else if (usage >= 1) {
+    parts.push(`当前承载 ${Math.round(usage * 100)}% 已超载，安排在此可避开高峰`)
+  } else if (usage >= 0.8) {
+    parts.push(`承载 ${Math.round(usage * 100)}% 偏高，建议错开午后时段`)
+  } else {
+    parts.push(`承载 ${Math.round(usage * 100)}%，余量充足，无需排队`)
+  }
 
   if (isRural) parts.push('且距离上一站路程相邻，可作为分流的承接点')
   else if (idx === 0) parts.push('作为当日首站，上午时段体验最佳')
@@ -452,7 +481,7 @@ useReveal(
       <SectionHead
         eyebrow="行程草案"
         :title="`${days} 天 · ${PACE_LABEL[pace]} · ${BUDGET_LABEL[budget]}预算`"
-        desc="每一站的理由都由规则实时算出：承载力读实时数据，兴趣匹配读你上面的选择。"
+        desc="每一站的理由都由规则算出：承载力读当日数据，兴趣匹配读你上面的选择。"
         size="lg"
         more-text="看真实资源"
         more-to="/explore"
@@ -510,7 +539,7 @@ useReveal(
                     <div class="stopcard__facts">
                       <span class="fact">
                         <i class="fact__k">承载</i>
-                        <b class="num" :class="`fact--${loadLv(s.usage)}`">{{ Math.round(s.usage * 100) }}%</b>
+                        <b class="num" :class="`fact--${loadLv(s.usage)}`">{{ usageText(s.usage) }}</b>
                       </span>
                       <span class="fact">
                         <i class="fact__k">建议时长</i>
@@ -583,8 +612,8 @@ useReveal(
           <div class="mcard reveal">
             <span class="mcard__no num">02</span>
             <h3 class="h3">承载力过滤</h3>
-            <p class="body">读取各点实时承载余量，余量低于阈值的点降权，余量充足的点前置。</p>
-            <span class="mcard__in">输入：各点 capacity 与实时占用</span>
+            <p class="body">读取各点当日承载余量，余量低于阈值的点降权，余量充足的点前置。</p>
+            <span class="mcard__in">输入：各点 capacity 与当日占用</span>
           </div>
           <div class="mcard reveal">
             <span class="mcard__no num">03</span>
@@ -595,7 +624,7 @@ useReveal(
         </div>
 
         <p class="method__foot">
-          本页当前由前端规则演示（<b>M4 多智能体规划尚未接入</b>）。上面每一条推荐理由都由规则实时算出，
+          本页当前由前端规则演示（<b>M4 多智能体规划尚未接入</b>）。上面每一条推荐理由都由规则当场算出，
           不是预置文案 —— 接入后端后，规则判定下沉到 M4，本页只负责渲染返回结果。
         </p>
       </section>
@@ -1078,6 +1107,10 @@ useReveal(
 }
 .fact--danger {
   color: var(--danger);
+}
+/* 承载未知：中性灰，不表态（既不能说舒适，也不能说拥挤） */
+.fact--unknown {
+  color: var(--ink-500);
 }
 .stopcard__hits {
   display: flex;

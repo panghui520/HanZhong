@@ -7,8 +7,10 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -20,6 +22,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.ApplicationArguments;
 import org.springframework.boot.ApplicationRunner;
+import org.springframework.core.annotation.Order;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
@@ -31,18 +34,21 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.PropertyNamingStrategies;
 import com.hanyou.brain.common.BizException;
 import com.hanyou.brain.common.ErrorCode;
+import com.hanyou.brain.common.GeoUtils;
 import com.hanyou.brain.common.RelationType;
 import com.hanyou.brain.config.HanYouProperties;
 import com.hanyou.brain.entity.CityProfile;
 import com.hanyou.brain.entity.Experience;
 import com.hanyou.brain.entity.Poi;
 import com.hanyou.brain.entity.PoiRelation;
+import com.hanyou.brain.entity.PoiVisitStat;
 import com.hanyou.brain.entity.Product;
 import com.hanyou.brain.entity.ProductCategory;
 import com.hanyou.brain.mapper.CityProfileMapper;
 import com.hanyou.brain.mapper.ExperienceMapper;
 import com.hanyou.brain.mapper.PoiMapper;
 import com.hanyou.brain.mapper.PoiRelationMapper;
+import com.hanyou.brain.mapper.PoiVisitStatMapper;
 import com.hanyou.brain.mapper.ProductCategoryMapper;
 import com.hanyou.brain.mapper.ProductMapper;
 
@@ -64,6 +70,7 @@ import lombok.RequiredArgsConstructor;
  * 也不要让库里出现一批指向空气的产品——那种问题要到演示时才被发现。
  */
 @Component
+@Order(1)
 @RequiredArgsConstructor
 public class CityPackImporter implements ApplicationRunner {
 
@@ -111,6 +118,7 @@ public class CityPackImporter implements ApplicationRunner {
     private final CityProfileMapper cityProfileMapper;
     private final PoiMapper poiMapper;
     private final PoiRelationMapper poiRelationMapper;
+    private final PoiVisitStatMapper poiVisitStatMapper;
     private final ProductCategoryMapper productCategoryMapper;
     private final ExperienceMapper experienceMapper;
     private final ProductMapper productMapper;
@@ -147,6 +155,8 @@ public class CityPackImporter implements ApplicationRunner {
         List<String> problems = new ArrayList<>();
         Map<String, String> nameToCode = nameToCode(categories, problems);
         List<Product> products = readProducts(dir, cityCode, nameToCode, problems);
+        // 客流统计要按 capacity 算占用率，所以放在 pois 之后读
+        List<PoiVisitStat> visitStats = readVisitStats(dir, cityCode, pois, problems);
         validateReferences(pois, categories, experiences, products, problems);
         failIfAny(problems, dir);
 
@@ -156,10 +166,11 @@ public class CityPackImporter implements ApplicationRunner {
         experienceMapper.delete(new LambdaQueryWrapper<Experience>().eq(Experience::getCityCode, cityCode));
         productCategoryMapper.delete(new LambdaQueryWrapper<ProductCategory>().eq(ProductCategory::getCityCode, cityCode));
         poiRelationMapper.delete(new LambdaQueryWrapper<PoiRelation>().eq(PoiRelation::getCityCode, cityCode));
+        poiVisitStatMapper.delete(new LambdaQueryWrapper<PoiVisitStat>().eq(PoiVisitStat::getCityCode, cityCode));
         poiMapper.delete(new LambdaQueryWrapper<Poi>().eq(Poi::getCityCode, cityCode));
         cityProfileMapper.deleteById(cityCode);
 
-        // 插入顺序与依赖一致：资源点 -> 分类 -> 体验 -> 产品 -> 关系
+        // 插入顺序与依赖一致：资源点 -> 分类 -> 体验 -> 产品 -> 关系 -> 客流统计
         cityProfileMapper.insert(profile);
         pois.forEach(poiMapper::insert);
         categories.forEach(productCategoryMapper::insert);
@@ -169,9 +180,11 @@ public class CityPackImporter implements ApplicationRunner {
         List<PoiRelation> relations = buildRelations(cityCode, pois);
         relations.forEach(poiRelationMapper::insert);
 
-        log.info("[CityPack] 导入完成 city={} 资源点={} 关系={} 分类={} 体验={} 产品={} 数据目录={}",
+        visitStats.forEach(poiVisitStatMapper::insert);
+
+        log.info("[CityPack] 导入完成 city={} 资源点={} 关系={} 分类={} 体验={} 产品={} 客流统计={} 数据目录={}",
                 cityCode, pois.size(), relations.size(), categories.size(),
-                experiences.size(), products.size(), dir);
+                experiences.size(), products.size(), visitStats.size(), dir);
     }
 
     /**
@@ -350,6 +363,80 @@ public class CityPackImporter implements ApplicationRunner {
     }
 
     /**
+     * 读取客流与经营日度统计（M5 的规则引擎输入）。
+     *
+     * <p><b>★ 数据包里存的是"距今天的天数偏移"（offset，0 = 今天），不是绝对日期。</b>
+     * 这里把它物化成真实日期。为什么不在数据包里写死日期：绝对日期一旦写进
+     * 数据包，跑一个月后"近 7 日"就全过期了 —— 而演示恰恰要反复看"近 7 日"。
+     * 偏移由导入时才知道的"今天"来解，所以每次重启导入拿到的都是
+     * 与当下对齐的数据，不需要定期重新生成数据包。
+     *
+     * <p>capacity_usage 在这里算好写入，不让读的人现算：capacity 是"设计承载"，
+     * 会随数据包更新而变化；现算的话，历史某天的占用率会跟着今天的 capacity
+     * 一起变，那就成了"上个月的数据今天看又是另一个数"。
+     *
+     * <p>数据包没有 visit_stats.json 时**不阻断启动**（老数据包仍能用），
+     * 只记一条 warn。这一步必须在日志里看得见：没有客流数据时 M5 的
+     * 规则引擎一条规则都跑不出来，界面会显示"0 条风险"，而那是
+     * 数据缺失、不是"一切正常"。
+     */
+    private List<PoiVisitStat> readVisitStats(Path dir, String cityCode, List<Poi> pois, List<String> problems) {
+        Path file = dir.resolve("visit_stats.json");
+        if (!Files.isRegularFile(file)) {
+            log.warn("[CityPack] 数据包没有 visit_stats.json，跳过客流统计导入；"
+                    + "M5 规则引擎将没有输入，风险事件会恒为 0。文件：{}", file);
+            return List.of();
+        }
+
+        VisitStatsJson pack = readJson(file, new TypeReference<VisitStatsJson>() {
+        });
+        Map<String, Integer> capacityOf = new HashMap<>();
+        for (Poi p : pois) {
+            capacityOf.put(p.getId(), p.getCapacity());
+        }
+
+        LocalDate today = LocalDate.now();
+        List<PoiVisitStat> out = new ArrayList<>();
+        for (VisitStatsPoiJson p : pack.getPois()) {
+            Integer capacity = capacityOf.get(p.getPoiId());
+            if (capacity == null) {
+                // 与产品/体验的引用校验同一处理方式：记问题、不静默丢弃
+                problems.add("visit_stats.json 里的 poi_id=" + p.getPoiId() + " 在 pois.json 里不存在");
+                continue;
+            }
+            for (VisitStatDayJson d : p.getSeries()) {
+                PoiVisitStat s = new PoiVisitStat();
+                s.setCityCode(cityCode);
+                s.setPoiId(p.getPoiId());
+                s.setStatDate(today.plusDays(d.getOffset()));
+                s.setVisitors(d.getVisitors());
+                s.setCapacityUsage(usageOf(d.getVisitors(), capacity));
+                s.setReviewCount(d.getReviewCount());
+                s.setNegativeCount(d.getNegativeCount());
+                s.setExperienceVisits(d.getExperienceVisits());
+                s.setPurchases(d.getPurchases());
+                s.setRepurchases(d.getRepurchases());
+                s.setSynthetic(true);
+                out.add(s);
+            }
+        }
+        return out;
+    }
+
+    /**
+     * 承载占用率 = 到访 / 设计承载，保留 4 位小数。
+     *
+     * <p>capacity 缺失或为 0 时返回 0 而不是抛异常：数据包里确实允许
+     * 某个资源点没有承载量（如交通枢纽），那不是错误，只是没有承载概念。
+     */
+    private static BigDecimal usageOf(Integer visitors, Integer capacity) {
+        if (visitors == null || capacity == null || capacity <= 0) {
+            return BigDecimal.ZERO.setScale(4, RoundingMode.HALF_UP);
+        }
+        return BigDecimal.valueOf(visitors).divide(BigDecimal.valueOf(capacity), 4, RoundingMode.HALF_UP);
+    }
+
+    /**
      * 分类名 -> 分类编码。
      *
      * <p>重名会让产品指到不确定的分类上，判为数据包错误。这里仍然返回一份 map
@@ -460,7 +547,7 @@ public class CityPackImporter implements ApplicationRunner {
                 if (to.getId().equals(from.getId()) || to.getLng() == null || to.getLat() == null) {
                     continue;
                 }
-                all.add(new Candidate(to, haversineKm(from, to)));
+                all.add(new Candidate(to, GeoUtils.haversineKm(from, to)));
             }
 
             // NEARBY：最近的几个，不分业态
@@ -516,22 +603,11 @@ public class CityPackImporter implements ApplicationRunner {
         return r;
     }
 
-    /** Haversine 球面距离（公里）。经纬度是估算值，距离保留到 0.01km 已足够 */
-    private static double haversineKm(Poi a, Poi b) {
-        double r = 6371.0;
-        double lat1 = a.getLat().doubleValue();
-        double lng1 = a.getLng().doubleValue();
-        double lat2 = b.getLat().doubleValue();
-        double lng2 = b.getLng().doubleValue();
-
-        double dLat = Math.toRadians(lat2 - lat1);
-        double dLng = Math.toRadians(lng2 - lng1);
-        double s = Math.sin(dLat / 2) * Math.sin(dLat / 2)
-                + Math.cos(Math.toRadians(lat1)) * Math.cos(Math.toRadians(lat2))
-                * Math.sin(dLng / 2) * Math.sin(dLng / 2);
-        return 2 * r * Math.asin(Math.sqrt(s));
-    }
-
+    /**
+     * Haversine 距离已抽到 {@link GeoUtils} —— M5 的分流候选排序要用同一个公式，
+     * 两处各抄一份必然会漂移（详情页说 12.3 km、公告说 12.5 km 就会被当成 bug）。
+     * 这里不再保留私有副本。
+     */
     private static BigDecimal toDecimal(Double v) {
         return v == null ? null : BigDecimal.valueOf(v);
     }
@@ -625,6 +701,43 @@ public class CityPackImporter implements ApplicationRunner {
         private String scene;
         private String dataOrigin;
         private String sourceUrl;
+    }
+
+    /**
+     * visit_stats.json 的镜像结构（M5）。
+     *
+     * <p>顶层带 synthetic / generator / note 三个说明字段，是**刻意保留**的：
+     * 它们让"这份数据是仿真出来的"写在数据文件本身里，而不是只写在文档里。
+     * 解析时用不到，但把文件交给别人看时一眼就能看到。
+     */
+    @Data
+    private static class VisitStatsJson {
+        private Boolean synthetic;
+        private String generator;
+        private String note;
+        private Integer days;
+        private List<VisitStatsPoiJson> pois;
+    }
+
+    @Data
+    private static class VisitStatsPoiJson {
+        private String poiId;
+        private String businessType;
+        private Integer capacity;
+        private Double baseUsage;
+        private List<VisitStatDayJson> series;
+    }
+
+    /** 一天的统计。offset 是"距导入日的天数偏移"，0 = 今天 */
+    @Data
+    private static class VisitStatDayJson {
+        private Integer offset;
+        private Integer visitors;
+        private Integer reviewCount;
+        private Integer negativeCount;
+        private Integer experienceVisits;
+        private Integer purchases;
+        private Integer repurchases;
     }
 
     /** 候选目标 + 到它的距离 */

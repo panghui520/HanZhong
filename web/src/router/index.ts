@@ -78,6 +78,17 @@ const routes = [
         component: () => import('@/views/portal/OrderDetail.vue'),
         meta: { requiresAuth: true },
       },
+      {
+        // M6 到访消费链：我的足迹。
+        // requiresAuth 与购物车/订单一致 —— 足迹是"我的数据"，
+        // 而且它决定「乡村好物」先给你看什么，未登录时这个页面没有内容可给。
+        // 页面里那个"登录后查看"的空态是**兜底**（在页面上退出登录时命中），
+        // 正常从导航点进来会先被上面的守卫送去登录页。
+        path: 'footprints',
+        name: 'footprints',
+        component: () => import('@/views/portal/Footprints.vue'),
+        meta: { requiresAuth: true },
+      },
     ],
   },
   // 登录页独立于 PortalLayout：不显示顶栏与页脚，保持沉浸感
@@ -98,6 +109,12 @@ const routes = [
         path: 'media',
         name: 'admin-media',
         component: () => import('@/views/admin/Media.vue'),
+      },
+      {
+        // M5 风险与工单：规则引擎判定的风险事件 → 建单 → 处置闭环
+        path: 'risks',
+        name: 'admin-risks',
+        component: () => import('@/views/admin/Risks.vue'),
       },
       {
         // M6 订单处理：待发货 → 已发货
