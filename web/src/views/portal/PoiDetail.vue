@@ -5,18 +5,21 @@ import PoiImage from '@/components/PoiImage.vue'
 import DiversionNoticeBar from '@/components/DiversionNoticeBar.vue'
 import { getExperiences, getPoiDetail, getProducts } from '@/api/citypack'
 import { getPoiImages } from '@/api/media'
+import { createPoiComment, getPoiComments } from '@/api/comments'
 import { createCheckin } from '@/api/trips'
 import { ApiError } from '@/api/http'
 import { useAsync } from '@/composables/useAsync'
-import { usePoiStats } from '@/composables/usePoiStats'
+import { crowdWord, usePoiStats } from '@/composables/usePoiStats'
 import { useDiversionNotices } from '@/composables/useDiversionNotices'
 import { useSessionStore } from '@/stores/session'
-import { BUSINESS_LABEL, type Experience, type Poi, type Product, type RelationItem } from '@/types'
-// 承载力已接真实数据（M5，见下方 usePoiStats）。本文件仍留在 mock 里的只有
-// ratingOf / reviewsOf —— 那是 M6 评价域的数据，poi 表没有评分列、
-// order_review 也还没有面向资源点的查询接口，等 M6 补齐后一并去掉。
-import { ratingOf } from '@/mock/stats'
-import { reviewsOf } from '@/mock/reviews'
+import {
+  BUSINESS_LABEL,
+  type Experience,
+  type Poi,
+  type PoiCommentList,
+  type Product,
+  type RelationItem,
+} from '@/types'
 
 const route = useRoute()
 const router = useRouter()
@@ -145,6 +148,47 @@ const poi = computed<Poi | undefined>(() => data.value?.detail.poi)
 const experiences = computed<Experience[]>(() => data.value?.experiences ?? [])
 const products = computed<Product[]>(() => data.value?.products ?? [])
 
+// ----------------------------------------------------------------------
+// 游客评价（M10 续）
+//
+// 这里原来用的是 `reviewsOf(poiId, businessType)` —— 按资源 id 派生的伪随机
+// 评价。不同景点确实显示不同内容，但那是算出来的，不是任何人写的。
+// 现在换成真表：GET /api/pois/{id}/comments。
+//
+// 加载与详情**分开**，不并进 loadDetail 的 Promise.all，有两个理由：
+//   ① 评论是次要内容，它失败不该把整个详情页打成错误态；
+//   ② 发表评论之后只需要刷新评论，不必把配图、体验、产品一起重取一遍。
+//
+// ★ 这一整块**必须声明在下面那个 watch 之前**，否则页面白屏。
+//   那个 watch 带 `{ immediate: true }`，setup 同步阶段就会先跑一次；
+//   此时 poi 还没加载、id 是 undefined，回调会走 `commentData.value = null`
+//   这一支。若 commentData 声明在它之后，就撞上 TDZ：
+//     ReferenceError: Cannot access 'commentData' before initialization
+//   Vue 的 setup 一旦抛错，整个详情页什么都不渲染 —— 接口全绿、页面全空。
+//   实测踩过：接口层 45/45 通过，浏览器里 /poi/P-SCE-001 是纯白。
+// ----------------------------------------------------------------------
+const commentData = ref<PoiCommentList | null>(null)
+const comments = computed(() => commentData.value?.items ?? [])
+const commentTotal = computed(() => commentData.value?.total ?? 0)
+
+/**
+ * 口碑评分：真实评论的均值，没有评论时为 null。
+ *
+ * 显示成「—」而不是 0 —— 0 分是"所有人都打了最低分"（一个结论），
+ * 没有评论是"没有数据"（另一个结论）。与承载率读不到时的处理同一条取舍。
+ */
+const averageRating = computed(() => commentData.value?.average_rating ?? null)
+
+async function loadComments(poiId: string) {
+  try {
+    commentData.value = await getPoiComments(poiId)
+  } catch {
+    // 评论拉不到（网络抖动 / 后端重启）就当"暂时没有"：景点信息本身是好的，
+    // 为一条次要内容把整页变成错误态不划算。置 null 让评论区走空状态。
+    commentData.value = null
+  }
+}
+
 // poi 切换时，从 sessionStorage 恢复"已打卡"本地态。
 // 注意：只有"今天"的打卡算 —— KEY 是按天滚动的，明天自动失效。
 watch(
@@ -153,10 +197,14 @@ watch(
     if (!id) {
       checkedIn.value = false
       checkinMsg.value = ''
+      commentData.value = null
       return
     }
     checkedIn.value = loadCheckedPoisToday().has(id)
     checkinMsg.value = ''
+    // 换了资源就重取评论。不能只在挂载时取一次：从「周边联动」点进另一个
+    // 资源时组件会被复用，路由参数变化不会重建组件。
+    void loadComments(id)
   },
   { immediate: true }
 )
@@ -207,7 +255,13 @@ const { statOf, usageOf } = usePoiStats()
 const stat = computed(() => (poi.value ? statOf(poi.value.id) : undefined))
 const usage = computed(() => (stat.value?.has_data ? stat.value.capacity_usage : undefined))
 const overloaded = computed(() => (usage.value ?? 0) >= 0.8)
-const usageText = computed(() => (usage.value == null ? '—' : `${Math.round(usage.value * 100)}%`))
+/**
+ * ★ 2026-09-28 面向游客：这里原来显示"当日占用率 23%"。
+ *   百分比是运营与答辩口径，游客只需要"现在去挤不挤"。
+ *   改用共享的 `crowdWord`（人少 / 人较多 / 人很多），阈值只有一份。
+ *   `usageWidth` 仍按真实占用率画进度条 —— 那是视觉提示，不是数字。
+ */
+const usageText = computed(() => crowdWord(usage.value))
 const usageWidth = computed(() => `${Math.min(usage.value ?? 0, 1) * 100}%`)
 
 /**
@@ -253,16 +307,76 @@ const diversionNotices = computed(() => (poi.value ? noticesForPoi(poi.value.id)
 const nearby = computed<RelationItem[]>(() => data.value?.detail.nearby ?? [])
 const nearbyBusiness = computed<RelationItem[]>(() => data.value?.detail.support ?? [])
 
-const reviews = computed(() => (poi.value ? reviewsOf(poi.value.id, poi.value.business_type) : []))
-
 /** 近 7 日客流（不含今天），后端按时间正序给 */
 const trend = computed(() => stat.value?.week_visitors ?? [])
 const trendMax = computed(() => Math.max(1, ...trend.value))
-const visitors = computed(() => (stat.value?.has_data ? stat.value.today_visitors : undefined))
-const visitorsText = computed(() =>
-  visitors.value == null ? '—' : visitors.value.toLocaleString()
+/** ★ 2026-09-28：原来这里还有 visitors / visitorsText（"今日到访约 N 人"），
+ *  随"承载上限 / 当日占用率"一起从游客端撤掉了 —— 见 loadcard 的注释。
+ *  趋势图保留：它是"这几天人多人少"的直观形状，不是容量参数。 */
+/** 口碑评分（展示用字符串）。没有评论时给「—」而不是 0 */
+const rating = computed(() =>
+  averageRating.value == null ? '—' : averageRating.value.toFixed(1)
 )
-const rating = computed(() => (poi.value ? ratingOf(poi.value.id) : 0))
+
+// ----------------------------------------------------------------------
+// 发表评论
+//
+// 与「我到过这里」的打卡同一套处理：未登录先提示、再跳登录页，
+// 且**提示必须比跳转早 0.8 秒** —— 页面一跳，提示条（组件状态）就没了，
+// 用户看到的是"点了按钮，莫名其妙到了登录页"。
+// ----------------------------------------------------------------------
+const commentRating = ref(5)
+const commentContent = ref('')
+const commentBusy = ref(false)
+const commentMsg = ref('')
+
+/**
+ * 星级档位对应的文案。下标即星数，0 位留空。
+ * 成熟评价组件都会在星星旁给出这行字 —— 用户不必先点下去才知道 3 星代表"还不错"。
+ */
+const RATING_LABEL = ['', '很差', '一般', '还不错', '很好', '非常棒']
+
+/** 鼠标悬停（或键盘聚焦）在第几档上；0 = 没悬停。只影响显示，不改已选值 */
+const hoverRating = ref(0)
+/** 星星该亮到第几档：悬停优先，移开就回到已选的那一档 */
+const displayRating = computed(() => hoverRating.value || commentRating.value)
+const ratingLabel = computed(() => RATING_LABEL[displayRating.value] ?? '')
+
+/** 均分四舍五入到整星，供区块标题右侧的汇总星条使用（无评论时 averageRating 为 null） */
+const avgStars = computed(() => Math.round(averageRating.value ?? 0))
+
+async function submitComment() {
+  if (!poi.value || commentBusy.value) return
+
+  if (!session.isLoggedIn) {
+    commentMsg.value = '请先登录，再发表评论'
+    window.setTimeout(() => {
+      void router.push({ path: '/login', query: { redirect: route.fullPath } })
+    }, 800)
+    return
+  }
+
+  const content = commentContent.value.trim()
+  if (!content) {
+    commentMsg.value = '写点什么再提交吧'
+    return
+  }
+
+  commentBusy.value = true
+  try {
+    await createPoiComment(poi.value.id, { rating: commentRating.value, content })
+    commentContent.value = ''
+    commentRating.value = 5
+    commentMsg.value = '评论已发表，谢谢你的反馈'
+    // 重新拉一次列表，而不是把返回值插到本地数组：服务端返回的那条才带着
+    // 数据库填的 created_at，而且顺带把评分均值一起更新了
+    await loadComments(poi.value.id)
+  } catch (e) {
+    commentMsg.value = e instanceof ApiError ? e.message : '提交失败，请稍后重试'
+  } finally {
+    commentBusy.value = false
+  }
+}
 </script>
 
 <template>
@@ -361,7 +475,7 @@ const rating = computed(() => (poi.value ? ratingOf(poi.value.id) : 0))
             </div>
             <span class="quick__sep" />
             <div class="quick">
-              <span class="quick__label">当前承载</span>
+              <span class="quick__label">今天人流</span>
               <span class="num quick__val" :class="{ 'quick__val--hot': overloaded }">
                 {{ usageText }}
               </span>
@@ -440,6 +554,18 @@ const rating = computed(() => (poi.value ? ratingOf(poi.value.id) : 0))
             <div class="row dbody__tags" style="margin-top: 16px">
               <span v-for="t in poi.tags" :key="t" class="tag tag-brand">{{ t }}</span>
             </div>
+          </section>
+
+          <!--
+            详细介绍（M10 续新增字段）。与上面的「简介」分开：简介是一句话，
+            列表与卡片都用它；这里是正文，只在详情页出现。
+            没填的景点**整块不显示**，而不是留一个空标题 ——
+            42 条数据包景点目前都是空的（数据包不提供这个字段），
+            显示 42 个空标题比不显示更糟。
+          -->
+          <section v-if="poi.detail" class="block">
+            <span class="eyebrow">详细介绍</span>
+            <p class="dbody__detail">{{ poi.detail }}</p>
           </section>
 
           <!-- 乡村体验 -->
@@ -537,31 +663,121 @@ const rating = computed(() => (poi.value ? ratingOf(poi.value.id) : 0))
             </div>
           </section>
 
-          <!-- 游客评价 -->
-          <section v-if="reviews.length" class="block">
+          <!-- 游客评价（M10 续：真实数据，来自 poi_comment 表） -->
+          <section class="block">
             <div class="row-between block__head">
               <div>
                 <span class="eyebrow">游客反馈</span>
                 <h2 class="h2 block__title">来过的人怎么说</h2>
               </div>
-              <span class="muted small">用于负面评价率与风险规则</span>
+
+              <!--
+                右侧汇总。★ 有评论才显示均分 —— 无评论时 averageRating 是 null，
+                显示 0.0 就是假数据，与"不显示假评论"是同一条纪律。
+              -->
+              <div v-if="commentTotal" class="rsum">
+                <span class="num rsum__score">{{ rating }}</span>
+                <span class="rsum__side">
+                  <span class="rsum__stars" :aria-label="`平均 ${rating} 星`">
+                    {{ '★'.repeat(avgStars) }}<i>{{ '★'.repeat(5 - avgStars) }}</i>
+                  </span>
+                  <span class="muted small">{{ commentTotal }} 条评价</span>
+                </span>
+              </div>
+              <span v-else class="muted small">暂无评价</span>
             </div>
-            <ul class="reviews">
-              <li v-for="(r, i) in reviews" :key="i" class="review">
-                <div class="review__head">
-                  <span class="review__author">{{ r.author }}</span>
-                  <span class="review__stars">{{ '★'.repeat(r.rating) }}<i>{{ '★'.repeat(5 - r.rating) }}</i></span>
-                  <span class="review__date num">{{ r.date }}</span>
+
+            <ul v-if="comments.length" class="reviews">
+              <li v-for="c in comments" :key="c.id" class="review">
+                <!-- 首字头像：不引入图片资源，也不依赖一个并不存在的头像字段 -->
+                <span class="review__avatar" aria-hidden="true">{{ c.nickname.slice(0, 1) }}</span>
+                <div class="review__main">
+                  <div class="review__head">
+                    <span class="review__author">{{ c.nickname }}</span>
+                    <span class="review__stars" :aria-label="`${c.rating} 星`">
+                      {{ '★'.repeat(c.rating) }}<i>{{ '★'.repeat(5 - c.rating) }}</i>
+                    </span>
+                    <span class="review__date num">{{ c.created_at.slice(0, 10) }}</span>
+                  </div>
+                  <p class="review__text">{{ c.content }}</p>
                 </div>
-                <p class="review__text">{{ r.text }}</p>
-                <span class="tag review__tag">{{ r.tag }}</span>
               </li>
             </ul>
+
+            <!--
+              没有评论时**不显示假数据**。这一句是产品要求，也是这一轮改造的
+              直接理由：在这之前这里显示的是按资源 id 派生的伪随机评价。
+
+              ★ 那句文案单独挂在 `.reviews__empty` 上、不掺任何装饰字符：
+                验收探针是按 textContent 逐字比对的，标记混进去就会把探针改瞎。
+            -->
+            <div v-else class="rempty">
+              <span class="rempty__mark" aria-hidden="true">❝</span>
+              <p class="muted reviews__empty">暂无评论，欢迎成为第一位评价的游客。</p>
+            </div>
+
+            <!-- 写评论 -->
+            <form class="cform" @submit.prevent="submitComment">
+              <div class="cform__head">
+                <span class="cform__title">我要评价</span>
+                <span class="muted small cform__hint">点击星星打分</span>
+              </div>
+
+              <div class="cform__rating">
+                <span class="stars" role="group" aria-label="给这个景点打分">
+                  <button
+                    v-for="i in 5"
+                    :key="i"
+                    type="button"
+                    class="stars__btn"
+                    :class="i <= displayRating ? 'stars__btn--on' : 'stars__btn--off'"
+                    :aria-pressed="i === commentRating"
+                    :aria-label="`打 ${i} 星`"
+                    :title="RATING_LABEL[i]"
+                    @click="commentRating = i"
+                    @mouseenter="hoverRating = i"
+                    @mouseleave="hoverRating = 0"
+                    @focus="hoverRating = i"
+                    @blur="hoverRating = 0"
+                  >
+                    ★
+                  </button>
+                </span>
+                <span class="stars__label" :class="{ 'stars__label--on': hoverRating > 0 }">
+                  {{ ratingLabel }}
+                </span>
+              </div>
+
+              <textarea
+                v-model="commentContent"
+                class="cfield"
+                rows="5"
+                maxlength="500"
+                placeholder="这个地方怎么样？写下来给后来的人参考。"
+              />
+
+              <div class="cform__foot">
+                <span v-if="commentMsg" class="cform__msg">{{ commentMsg }}</span>
+                <span v-else class="muted small">你的评价会公开展示在这个景点页</span>
+                <span class="cform__actions">
+                  <span
+                    class="num cform__count"
+                    :class="{ 'cform__count--near': commentContent.length > 450 }"
+                  >
+                    {{ commentContent.length }} / 500
+                  </span>
+                  <button type="submit" class="btn btn-primary" :disabled="commentBusy">
+                    {{ commentBusy ? '提交中…' : '发表评价' }}
+                  </button>
+                </span>
+              </div>
+            </form>
           </section>
 
           <p class="disclaimer">
             数据来源：名称、等级、简介整理自汉中市文化和旅游局等公开渠道；
-            承载力、客流、评分与游客评价均为演示用仿真数据（SIMULATED），不代表真实统计口径。
+            人流与拥挤度为演示用仿真数据，仅供参考，不代表真实统计口径。
+            口碑评分与游客评价来自本站用户提交的真实评论。
           </p>
         </div>
 
@@ -584,6 +800,20 @@ const rating = computed(() => (poi.value ? ratingOf(poi.value.id) : 0))
               <span class="muted small">建议时长</span>
               <span class="infocard__val small">{{ poi.duration_min }} 分钟</span>
             </div>
+            <template v-if="poi.address">
+              <hr class="hairline" />
+              <div class="infocard__row">
+                <span class="muted small">地址</span>
+                <span class="infocard__val small">{{ poi.address }}</span>
+              </div>
+            </template>
+            <template v-if="poi.phone">
+              <hr class="hairline" />
+              <div class="infocard__row">
+                <span class="muted small">电话</span>
+                <span class="num infocard__val small">{{ poi.phone }}</span>
+              </div>
+            </template>
             <hr class="hairline" />
             <div class="infocard__row">
               <span class="muted small">口碑评分</span>
@@ -591,10 +821,12 @@ const rating = computed(() => (poi.value ? ratingOf(poi.value.id) : 0))
             </div>
           </div>
 
-          <!-- 承载状态。数字来自 /api/stats/pois（合成客流），读不到时显示 "—" -->
+          <!-- 人流状态。数字来自 /api/stats/pois（合成客流），读不到时显示 "—"。
+               ★ 2026-09-28 面向游客：不再显示"今日到访 N 人 / 承载上限 M 人"
+               这类容量参数，只给"今天人多不多"的结论；进度条仍按真实占用率画。 -->
           <div class="card loadcard">
             <div class="loadcard__head">
-              <span class="eyebrow">当日承载</span>
+              <span class="eyebrow">今天人多不多</span>
               <span class="num loadcard__pct" :class="{ 'loadcard__pct--hot': overloaded }">
                 {{ usageText }}
               </span>
@@ -602,10 +834,7 @@ const rating = computed(() => (poi.value ? ratingOf(poi.value.id) : 0))
             <div class="loadcard__bar">
               <i :class="{ 'loadcard__fill--hot': overloaded }" :style="{ width: usageWidth }" />
             </div>
-            <p class="muted small loadcard__note">
-              今日到访约 {{ visitorsText }} 人 / 承载上限
-              {{ poi.capacity.toLocaleString() }} 人
-            </p>
+            <p class="muted small loadcard__note">人流为演示用仿真数据，仅供参考</p>
 
             <div class="spark">
               <div
@@ -620,7 +849,7 @@ const rating = computed(() => (poi.value ? ratingOf(poi.value.id) : 0))
           </div>
 
           <!--
-            分流建议（自动兜底）。候选是后端算好的 diversion 关系，再按**真实承载**
+            今日游览建议（自动兜底）。候选是后端算好的 diversion 关系，再按**真实承载**
             过滤，所以这里是"当前可承接"而不是 M1 阶段的"空间上可承接"。
 
             **有运营发布的公告时整块让位**（`!diversionNotices.length`）：
@@ -631,15 +860,16 @@ const rating = computed(() => (poi.value ? ratingOf(poi.value.id) : 0))
             距离与方向来自 poi_relation，承载阈值来自 risk_rule，
             没有一步经过模型。把确定性结论标成 AI 生成，
             恰好丢掉了本系统最值得讲的那一点（规则引擎判、模型只负责解释）。
+            游客端则统一叫「今日游览建议」，与首页那条一致。
           -->
           <div
             v-if="overloaded && diversions.length && !diversionNotices.length"
             class="card divcard"
           >
-            <span class="eyebrow">分流建议 · 规则引擎判定</span>
+            <span class="eyebrow">今日游览建议</span>
             <p class="divcard__desc">
-              该点位承载已接近上限，系统建议把部分行程引导至以下乡村点——
-              车程更短、当前承载宽裕，且具备可体验、可消费的乡村业态。
+              这里今天人比较多。不远处这几个村子车程短、人少，还能下地体验、带走点特产 ——
+              想把时间留给风景，可以先往那边走。
             </p>
             <router-link
               v-for="d in diversions"
@@ -648,7 +878,7 @@ const rating = computed(() => (poi.value ? ratingOf(poi.value.id) : 0))
               class="divcard__item"
             >
               <span class="divcard__name">{{ d.name }}</span>
-              <span class="muted small">{{ fmtKm(d.distance_km) }} · 承载 {{ Math.round(d.u * 100) }}%</span>
+              <span class="muted small">{{ fmtKm(d.distance_km) }} · 今天{{ crowdWord(d.u) }}</span>
             </router-link>
           </div>
         </aside>
@@ -823,6 +1053,19 @@ const rating = computed(() => (poi.value ? ratingOf(poi.value.id) : 0))
 .dbody__tags {
   gap: var(--sp-2);
   flex-wrap: wrap;
+}
+/*
+  详细介绍正文。比简介（.dbody__lead）字号小半档、行距更大：
+  简介是"一眼看完"，这里是"坐下来读"。
+  pre-wrap 是为了保留运营在后台 textarea 里敲的换行 —— 否则一段
+  分好段落的介绍会挤成一大坨。
+*/
+.dbody__detail {
+  margin-top: var(--sp-3);
+  font-size: 15px;
+  line-height: 2;
+  color: var(--ink-600);
+  white-space: pre-wrap;
 }
 
 /* 体验 */
@@ -1030,16 +1273,65 @@ const rating = computed(() => (poi.value ? ratingOf(poi.value.id) : 0))
   flex: none;
 }
 
-/* 评价 */
+/* ---------- 游客反馈 ---------- */
+
+/* 区块标题右侧的汇总：均分 + 星条 + 条数 */
+.rsum {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+}
+.rsum__score {
+  font-size: 34px;
+  line-height: 1;
+  font-weight: 600;
+  color: var(--brand-700);
+}
+.rsum__side {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.rsum__stars {
+  color: var(--gold-500);
+  font-size: var(--fs-sm);
+  letter-spacing: 2px;
+}
+.rsum__stars i {
+  color: var(--line);
+  font-style: normal;
+}
+
+/* 评论列表 */
 .reviews {
   display: flex;
   flex-direction: column;
   gap: var(--sp-3);
 }
 .review {
-  padding: var(--sp-4) var(--sp-5);
+  display: flex;
+  gap: var(--sp-4);
+  padding: var(--sp-5);
   background: var(--paper-2);
+  border: 1px solid var(--line-soft);
   border-radius: var(--r-lg);
+}
+.review__avatar {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  border-radius: var(--r-pill);
+  background: var(--brand-100);
+  color: var(--brand-700);
+  font-size: var(--fs-body);
+  font-weight: 600;
+  user-select: none;
+}
+.review__main {
+  flex: 1;
+  min-width: 0;
 }
 .review__head {
   display: flex;
@@ -1070,9 +1362,158 @@ const rating = computed(() => (poi.value ? ratingOf(poi.value.id) : 0))
   font-size: var(--fs-sm);
   color: var(--ink-600);
   line-height: 1.8;
+  /* 用户换行原样保留；长串不撑破卡片 */
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
-.review__tag {
-  margin-top: var(--sp-3);
+
+/* 空状态：一句话配一个克制的引号，避免"大片留白里飘一行小字" */
+.rempty {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  padding: var(--sp-6) var(--sp-5);
+  background: var(--paper-2);
+  border: 1px dashed var(--line);
+  border-radius: var(--r-lg);
+}
+.rempty__mark {
+  flex: none;
+  font-family: var(--font-display);
+  font-size: 32px;
+  line-height: 1;
+  color: var(--gold-300);
+}
+/* 只保留字号：内边距交给 .rempty，颜色交给 .muted */
+.reviews__empty {
+  font-size: var(--fs-sm);
+}
+
+/* ---------- 写评论 ---------- */
+.cform {
+  margin-top: var(--sp-5);
+  padding: var(--sp-5) var(--sp-5) var(--sp-4);
+  background: var(--paper-2);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--r-lg);
+}
+.cform__head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-3);
+  padding-bottom: var(--sp-3);
+  border-bottom: 1px solid var(--line-soft);
+}
+.cform__title {
+  font-size: var(--fs-h3);
+  font-weight: 600;
+  color: var(--ink-900);
+}
+.cform__hint {
+  margin-left: auto;
+}
+
+/* 星级：26px 可点区域 + 悬停预览 + 档位文案 */
+.cform__rating {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-4) 0 var(--sp-3);
+}
+.stars {
+  display: inline-flex;
+  gap: var(--sp-1);
+}
+.stars__btn {
+  padding: 0;
+  border: 0;
+  background: none;
+  font-size: 26px;
+  line-height: 1;
+  cursor: pointer;
+  transition: color var(--dur-1) var(--ease), transform var(--dur-1) var(--ease);
+}
+.stars__btn:hover {
+  transform: scale(1.12);
+}
+.stars__btn--on {
+  color: var(--gold-500);
+}
+.stars__btn--off {
+  color: var(--line);
+}
+.stars__btn:focus-visible {
+  outline: 2px solid var(--brand-500);
+  outline-offset: 2px;
+  border-radius: var(--r-sm);
+}
+.stars__label {
+  font-size: var(--fs-sm);
+  color: var(--warm-500);
+  transition: color var(--dur-1) var(--ease);
+}
+.stars__label--on {
+  color: var(--gold-600);
+  font-weight: 600;
+}
+
+/*
+  输入框。
+  ★ 这里原本写的是 `class="field field--area"` —— 而这两个类**在本组件里
+    从未定义过**（`.field` 只存在于管理端两个 SFC 的 scoped 样式里，且那套是
+    深色主题、用了 portal 里不存在的 `--line-strong`）。
+    于是 textarea 一直吃浏览器默认样式：cols=20 的窄框、系统字体、方角边框 ——
+    这正是"窄得和卡片留白完全不匹配、且与整体设计风格不统一"的根源。
+    现在给它一套自己的类，不再借用别处的名字。
+*/
+.cfield {
+  display: block;
+  width: 100%;
+  min-height: 132px;
+  padding: var(--sp-4);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--paper);
+  color: var(--ink-700);
+  font-family: var(--font-sans);
+  font-size: var(--fs-sm);
+  line-height: 1.8;
+  resize: vertical;
+  transition: border-color var(--dur-1) var(--ease), box-shadow var(--dur-1) var(--ease);
+}
+.cfield::placeholder {
+  color: var(--warm-400);
+}
+.cfield:focus {
+  outline: none;
+  border-color: var(--brand-500);
+  box-shadow: 0 0 0 3px var(--brand-50);
+}
+
+/* 底部：左侧提示 / 右侧「字数 + 发表」 */
+.cform__foot {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  margin-top: var(--sp-4);
+}
+.cform__msg {
+  font-size: var(--fs-sm);
+  color: var(--brand-700);
+}
+.cform__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  margin-left: auto;
+}
+.cform__count {
+  font-size: var(--fs-cap);
+  color: var(--warm-500);
+  transition: color var(--dur-1) var(--ease);
+}
+.cform__count--near {
+  color: var(--warn);
 }
 
 .disclaimer {

@@ -106,6 +106,23 @@ public class CityPackImporter implements ApplicationRunner {
     private static final String TYPE_RURAL = "RURAL_SPOT";
 
     /**
+     * 本导入器写入的行都标 PACK（M10）。
+     *
+     * <p>与之相对的是 ADMIN —— 运营在管理端新建的资源。删除条件据此收窄为
+     * {@code city_code = ? AND source = 'PACK'}，否则每次重启都会把运营新建的
+     * 景点/美食/农产品一起清掉。详见 db/V11__m10_resource_admin.sql 文件头。
+     */
+    private static final String SOURCE_PACK = "PACK";
+
+    /**
+     * 运营在管理端新建、或从数据包**接管**过来的资源（M10 续）。
+     *
+     * <p>导入器**只写 PACK**，这里出现 ADMIN 纯粹是为了读：判断哪些 id
+     * 已经被接管、插入数据包资源时要跳过它们。见 {@link #takenOverPoiIds}。
+     */
+    private static final String SOURCE_ADMIN = "ADMIN";
+
+    /**
      * 配套型业态：吃、住、行、购。
      *
      * <p>景区与乡村是"目的地"，不作为配套关系的目标——否则详情页的
@@ -160,22 +177,88 @@ public class CityPackImporter implements ApplicationRunner {
         validateReferences(pois, categories, experiences, products, problems);
         failIfAny(problems, dir);
 
+        // ★ 重灌前先记下"被运营下架过"的行（M10）。
+        //
+        // `status` **不在数据包里** —— citypack/hanzhong/pois.json 里没有这个字段。
+        // 所以"重灌时一律置 1"等于**把运营的下架动作撤销掉**。而数据包资源既不能删、
+        // 也不能改字段（见 AdminResourceServiceImpl.requireAdminOwned），
+        // **下架是运营唯一能让它从游客端消失的手段** —— 撤销它，这条手段就形同虚设。
+        // 因此这三张表的 status 按"运营态"处理，而不是"数据包态"。
+        Map<String, Integer> offlinePois = offlinePoiStatuses(cityCode);
+        Map<String, Integer> offlineExperiences = offlineExperienceStatuses(cityCode);
+        Map<String, Integer> offlineProducts = offlineProductStatuses(cityCode);
+
+        // ★ 已被管理员接管的资源 id（M10 续）。插入前要跳过它们，见下面的说明。
+        Set<String> takenOverPoiIds = takenOverPoiIds(cityCode);
+
         // 数据包是权威来源：每次启动全量重建，避免上一次导入的残留混进来。
         // 删除顺序与依赖相反——先删下游的产品，再删它依赖的体验与分类。
-        productMapper.delete(new LambdaQueryWrapper<Product>().eq(Product::getCityCode, cityCode));
-        experienceMapper.delete(new LambdaQueryWrapper<Experience>().eq(Experience::getCityCode, cityCode));
+        //
+        // ★ poi / experience / product 三张表只删 source='PACK' 的行（M10）。
+        // 运营在管理端新建的资源标的是 ADMIN，它们不在数据包里，重灌时也就
+        // 不该被当成"上一次导入的残留"清掉 —— 否则运营加一个景点，重启一次
+        // 就没了。收窄后的条件与收窄前删的是同一批行（库里其余全是 PACK），
+        // 所以对现有数据包行为完全不变。
+        //
+        // 另外四张表**不加**这个条件，是刻意的：
+        //   product_category 是数据包的字典表，没有"人工新建分类"这回事；
+        //   poi_relation / poi_visit_stat / city_profile 都是**算出来的投影**
+        //   （关系网络、客流统计、城市档案），全量重建正是它们的正确行为。
+        productMapper.delete(new LambdaQueryWrapper<Product>()
+                .eq(Product::getCityCode, cityCode)
+                .eq(Product::getSource, SOURCE_PACK));
+        experienceMapper.delete(new LambdaQueryWrapper<Experience>()
+                .eq(Experience::getCityCode, cityCode)
+                .eq(Experience::getSource, SOURCE_PACK));
         productCategoryMapper.delete(new LambdaQueryWrapper<ProductCategory>().eq(ProductCategory::getCityCode, cityCode));
         poiRelationMapper.delete(new LambdaQueryWrapper<PoiRelation>().eq(PoiRelation::getCityCode, cityCode));
         poiVisitStatMapper.delete(new LambdaQueryWrapper<PoiVisitStat>().eq(PoiVisitStat::getCityCode, cityCode));
-        poiMapper.delete(new LambdaQueryWrapper<Poi>().eq(Poi::getCityCode, cityCode));
+        poiMapper.delete(new LambdaQueryWrapper<Poi>()
+                .eq(Poi::getCityCode, cityCode)
+                .eq(Poi::getSource, SOURCE_PACK));
         cityProfileMapper.deleteById(cityCode);
 
         // 插入顺序与依赖一致：资源点 -> 分类 -> 体验 -> 产品 -> 关系 -> 客流统计
         cityProfileMapper.insert(profile);
-        pois.forEach(poiMapper::insert);
+        // ★ 跳过已被管理员接管的 id（M10 续）。
+        //
+        // 一条 PACK 资源被运营编辑过之后 source 已变成 ADMIN（见
+        // AdminResourceServiceImpl.updatePoi），所以上面那句删除**不会删它**，
+        // 而数据包里它还在。若这里照样 insert，就是往一个已存在的主键上再插一次，
+        // 整个启动事务回滚 —— 表现为"改了某个景点之后后端再也起不来"。
+        //
+        // 跳过之后这条资源**完全归运营管**：数据包后续更新了它的名字/简介，
+        // 也不会再同步到这一行。这正是"接管"这个动作的应有之义 ——
+        // 运营改过的东西不能被静默覆盖回去。
+        pois.stream()
+                .filter(p -> !takenOverPoiIds.contains(p.getId()))
+                .forEach(poiMapper::insert);
         categories.forEach(productCategoryMapper::insert);
         experiences.forEach(experienceMapper::insert);
         products.forEach(productMapper::insert);
+
+        // 把运营设过的下架状态写回去（M10，见上面 offlinePoiStatuses 的说明）。
+        // 为什么不在插入时直接写对状态：那要给三个 readXxx 各加一个 map 参数，
+        // 而它们现在是纯函数（只读 JSON、不碰库）。整个 run() 在一个事务里，
+        // 中间不会有人看见这些行短暂回到"上架"。
+        offlinePois.forEach((id, status) -> {
+            Poi patch = new Poi();
+            patch.setId(id);
+            patch.setStatus(status);
+            poiMapper.updateById(patch);
+        });
+        offlineExperiences.forEach((id, status) -> {
+            Experience patch = new Experience();
+            patch.setId(id);
+            patch.setStatus(status);
+            experienceMapper.updateById(patch);
+        });
+        offlineProducts.forEach((id, status) -> {
+            Product patch = new Product();
+            patch.setId(id);
+            patch.setStatus(status);
+            productMapper.updateById(patch);
+        });
 
         List<PoiRelation> relations = buildRelations(cityCode, pois);
         relations.forEach(poiRelationMapper::insert);
@@ -185,6 +268,71 @@ public class CityPackImporter implements ApplicationRunner {
         log.info("[CityPack] 导入完成 city={} 资源点={} 关系={} 分类={} 体验={} 产品={} 客流统计={} 数据目录={}",
                 cityCode, pois.size(), relations.size(), categories.size(),
                 experiences.size(), products.size(), visitStats.size(), dir);
+    }
+
+    /**
+     * 读出一张表里**被运营下架过**的行（{@code status != 1}），用于重灌后还原。
+     *
+     * <p>为什么只挑 {@code status != 1}：上架是默认值，绝大多数行都是 1，
+     * 把它们也读出来再逐条 UPDATE 是白做。只还原"少数被改过的"，
+     * 一次重启多出的写操作量与运营实际下架过的条数同阶。
+     *
+     * <p>三类资源各写一个方法而不是抽成一个泛型：MyBatis-Plus 的 lambda 列引用
+     * （{@code SFunction}）在泛型里传参需要把 5 个列引用都当参数塞进来，
+     * 读起来比三份直白的代码更难对。这里重复是有意的。
+     */
+    private Map<String, Integer> offlinePoiStatuses(String cityCode) {
+        return poiMapper.selectList(new LambdaQueryWrapper<Poi>()
+                        .eq(Poi::getCityCode, cityCode)
+                        .eq(Poi::getSource, SOURCE_PACK)
+                        .ne(Poi::getStatus, 1))
+                .stream()
+                .collect(Collectors.toMap(Poi::getId, Poi::getStatus));
+    }
+
+    private Map<String, Integer> offlineExperienceStatuses(String cityCode) {
+        return experienceMapper.selectList(new LambdaQueryWrapper<Experience>()
+                        .eq(Experience::getCityCode, cityCode)
+                        .eq(Experience::getSource, SOURCE_PACK)
+                        .ne(Experience::getStatus, 1))
+                .stream()
+                .collect(Collectors.toMap(Experience::getId, Experience::getStatus));
+    }
+
+    private Map<String, Integer> offlineProductStatuses(String cityCode) {
+        return productMapper.selectList(new LambdaQueryWrapper<Product>()
+                        .eq(Product::getCityCode, cityCode)
+                        .eq(Product::getSource, SOURCE_PACK)
+                        .ne(Product::getStatus, 1))
+                .stream()
+                .collect(Collectors.toMap(Product::getId, Product::getStatus));
+    }
+
+    /**
+     * 已被管理员接管的资源 id（M10 续）。
+     *
+     * <p>取 {@code source = 'ADMIN'} 的全部 id。这个集合里有两类东西，
+     * 放在一起只是省一次查询：
+     * <ul>
+     *   <li>运营在管理端新建的资源（id 形如 P-ADM-001）—— 数据包里没有这些 id，
+     *       过滤掉它们不产生任何影响；</li>
+     *   <li>从数据包**接管**来的资源（id 仍是 P-SCE-001）—— <b>这一类才是关键</b>：
+     *       数据包里还有同 id 的行，不跳过就会主键冲突。</li>
+     * </ul>
+     *
+     * <p>只查 poi、不查 experience / product：本轮只做了景点的接管
+     * （见 AdminResourceServiceImpl.requireAdminOwned 的注释）。那两张表当前
+     * 不可能出现"ADMIN 行与数据包同 id"的情形，所以没有这个问题 ——
+     * 真要做的时候，这里要一起加，否则会以完全相同的形态炸掉。
+     */
+    private Set<String> takenOverPoiIds(String cityCode) {
+        return poiMapper.selectList(new LambdaQueryWrapper<Poi>()
+                        .select(Poi::getId)
+                        .eq(Poi::getCityCode, cityCode)
+                        .eq(Poi::getSource, SOURCE_ADMIN))
+                .stream()
+                .map(Poi::getId)
+                .collect(Collectors.toSet());
     }
 
     /**
@@ -268,6 +416,7 @@ public class CityPackImporter implements ApplicationRunner {
             p.setDataOrigin(j.getDataOrigin());
             p.setSourceUrl(j.getSourceUrl());
             p.setStatus(1);
+            p.setSource(SOURCE_PACK);
             out.add(p);
         }
         return out;
@@ -314,6 +463,7 @@ public class CityPackImporter implements ApplicationRunner {
             e.setDataOrigin(j.getDataOrigin());
             e.setSourceUrl(j.getSourceUrl());
             e.setStatus(1);
+            e.setSource(SOURCE_PACK);
             out.add(e);
         }
         return out;
@@ -351,6 +501,7 @@ public class CityPackImporter implements ApplicationRunner {
             p.setDataOrigin(j.getDataOrigin());
             p.setSourceUrl(j.getSourceUrl());
             p.setStatus(1);
+            p.setSource(SOURCE_PACK);
 
             String code = nameToCode.get(j.getCategory());
             if (code == null) {

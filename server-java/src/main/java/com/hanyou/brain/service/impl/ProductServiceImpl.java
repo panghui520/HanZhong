@@ -61,8 +61,11 @@ public class ProductServiceImpl implements ProductService {
     @Override
     public ProductVO getProduct(String id) {
         Product p = productMapper.selectById(id);
-        if (p == null) {
-            throw new BizException(ErrorCode.NOT_FOUND, "产品不存在：" + id);
+        // ★ 下架的农产品对游客不存在（M10）。与 PoiServiceImpl.getPoiDetail 同理：
+        //   判据必须是 status，不能只是"查得到"，否则下架后详情页还能靠直链打开。
+        //   列表（listProducts）本来就带 `.eq(Product::getStatus, 1)`，这里补上才对齐。
+        if (p == null || !Integer.valueOf(1).equals(p.getStatus())) {
+            throw new BizException(ErrorCode.NOT_FOUND, "产品不存在或已下架：" + id);
         }
         return toVOs(List.of(p)).get(0);
     }

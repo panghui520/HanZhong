@@ -116,7 +116,14 @@ public final class RuleEngine {
      *   <li>{@code >= threshold_2}（默认 1.00）→ 一级，已经超载</li>
      *   <li>{@code >= threshold}（默认 0.80）→ 预警，接近上限</li>
      * </ul>
-     * 两档写成一条规则而不是两条，是因为它们**同一个指标、同一个动作**，
+     *
+     * <p><b>预警档的阈值可以被单个景点覆盖</b>（M10 续）：
+     * {@code poi.warning_threshold} 非空时用它，为空时回退 {@code risk_rule.threshold}。
+     *
+     * <p>一级档（超载）**不覆盖**，也不该覆盖 —— "装不下就是装不下"是物理事实，
+     * 不是运营口径。允许把它调低只会让系统报出一批"其实还装得下"的一级告警。
+     *
+     * <p>两档写成一条规则而不是两条，是因为它们**同一个指标、同一个动作**，
      * 只是紧急程度不同。拆成两条规则会让界面出现"同一个景区两条几乎
      * 一样的告警"，而运营真正需要的是"这条要立刻处理，那条先盯着"。
      */
@@ -125,7 +132,8 @@ public final class RuleEngine {
         if (rule == null) {
             return;
         }
-        BigDecimal warn = rule.getThreshold();
+        // 全局阈值（risk_rule.threshold）。景点没有自己配预警线时回退到它。
+        BigDecimal globalWarn = rule.getThreshold();
         BigDecimal severe = rule.getThreshold2() != null ? rule.getThreshold2() : BigDecimal.ONE;
 
         for (PoiVisitStat s : todayStats(ctx)) {
@@ -133,6 +141,22 @@ public final class RuleEngine {
             if (poi == null || !TYPE_SCENIC.equals(poi.getBusinessType())) {
                 continue;
             }
+
+            // ★ 景点自己配了预警线就用它（M10 续，poi.warning_threshold）。
+            //
+            // 没配（null）就回退全局 —— 现有 42 条景点的这一列**全是 null**
+            // （数据包不提供它，只有运营在管理端接管后编辑才会写），
+            // 所以对既有数据的行为完全不变。这是这次改动唯一的安全前提，
+            // 换城市时也要成立：新数据包里的景点同样不带这一列。
+            //
+            // 为什么让景点覆盖全局，而不是反过来：全局阈值回答的是
+            // "这类资源一般多少算挤"，而每个景点的承载弹性差别很大
+            // （峡谷栈道 9000 人与博物馆 3000 人不是一回事）。
+            // 运营最了解自己管的那一个点。
+            BigDecimal warn = poi.getWarningThreshold() != null
+                    ? poi.getWarningThreshold()
+                    : globalWarn;
+
             BigDecimal usage = s.getCapacityUsage();
             boolean over = usage.compareTo(severe) >= 0;
             if (!over && usage.compareTo(warn) < 0) {

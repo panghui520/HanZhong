@@ -3,6 +3,10 @@ import { ref } from 'vue'
 
 const menus = [
   { key: 'dashboard', label: '管理驾驶舱', to: '/admin/dashboard', icon: '◎' },
+  // M10 资源管理。三个入口（景点 / 美食 / 农产品）在页面内以标签页呈现，
+  // 而不是做成三个菜单项：现有菜单是扁平的，为它们加一层展开/收起
+  // 会动到整个侧栏的结构，而它们本来就是同一件事的三个视图。
+  { key: 'resources', label: '资源管理', to: '/admin/resources', icon: '◈' },
   { key: 'risks', label: '风险与工单', to: '/admin/risks', icon: '⚠' },
   { key: 'orders', label: '订单处理', to: '/admin/orders', icon: '⇄' },
   { key: 'media', label: '图片管理', to: '/admin/media', icon: '▤' },

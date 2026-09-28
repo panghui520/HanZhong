@@ -49,6 +49,13 @@ public class Experience {
 
     private String dataOrigin;
     private String sourceUrl;
+
+    /**
+     * 来源：PACK 数据包导入 / ADMIN 运营在管理端新建（M10）。
+     * 与 {@link Poi#getSource()} 同一列语义，理由见 db/V11__m10_resource_admin.sql。
+     */
+    private String source;
+
     private Integer status;
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;

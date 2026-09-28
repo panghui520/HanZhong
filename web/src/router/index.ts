@@ -105,6 +105,15 @@ const routes = [
         component: () => import('@/views/admin/Dashboard.vue'),
       },
       {
+        // M10 资源管理：景点 / 美食 / 农产品的列表、搜索、状态筛选与上下架维护。
+        // 三个入口做成页面内的标签页而不是三条路由 —— 它们共用同一套列表与表单
+        // （景点与美食在后端还是同一张 poi 表），拆成三条路由只会多两份重复代码，
+        // 而"改一处忘一处"在这里的后果是某个入口悄悄少一个字段。
+        path: 'resources',
+        name: 'admin-resources',
+        component: () => import('@/views/admin/Resources.vue'),
+      },
+      {
         // M9 图片管理：轮播图 + 每个景点的配图，上传/替换/删除/排序
         path: 'media',
         name: 'admin-media',

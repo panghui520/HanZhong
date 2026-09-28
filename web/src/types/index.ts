@@ -12,7 +12,11 @@ export interface Poi {
   name: string
   business_type: BusinessType
   district: string
+  /** 详细地址（街道门牌）。M10 续新增；数据包暂不提供，未接管前为 null */
+  address?: string
   level?: string
+  /** 对外联系电话。M10 续新增；同上 */
+  phone?: string
   lng: number
   lat: number
   ticket_price: number
@@ -21,6 +25,8 @@ export interface Poi {
   capacity: number
   tags: string[]
   summary: string
+  /** 详细介绍正文。summary 是一句话简介，这里是长文。M10 续新增 */
+  detail?: string
   scene?: string
   data_origin?: string
   source_url?: string
@@ -1431,5 +1437,129 @@ export const OPS_MODE_LABEL: Record<OpsAnalysis['mode'], string> = {
   llm: '模型生成',
   cache: '离线回放',
   unavailable: '暂不可用',
+}
+
+// ============================================================
+// M10 资源管理（运营端）
+// ============================================================
+
+/**
+ * 资源的来源。
+ *
+ * - `PACK`  城市数据包导入（`citypack/<city>/*.json`）。**每次后端启动都会被重建**，
+ *           因此管理端不允许编辑或删除它 —— 改了、删了下次启动就回去了。
+ * - `ADMIN` 运营在管理端新建。不在导入器的重建范围内，重启不受影响。
+ *
+ * 这个字段是"运营新建的资源重启后会消失"这个问题的解法，
+ * 见 `db/V11__m10_resource_admin.sql`。
+ */
+export type ResourceSource = 'PACK' | 'ADMIN'
+
+/**
+ * 运营端的资源入口。
+ *
+ * 与后端 `/api/admin/resources/**` 的路径一一对应：
+ * `scenic` 与 `food` 打 `/pois`（同一张 poi 表的不同业态），`product` 打 `/products`。
+ */
+export type ResourceKind = 'scenic' | 'food' | 'product'
+
+/** 入口中文名。放在类型文件里而不是页面里：菜单与页面标题都要用 */
+export const RESOURCE_KIND_LABEL: Record<ResourceKind, string> = {
+  scenic: '景点管理',
+  food: '美食管理',
+  product: '农产品管理',
+}
+
+/**
+ * 景点与美食在运营端的视图。
+ *
+ * 继承游客端的 {@link Poi} 再补管理端字段，而不是另写一份：字段来源是同一个
+ * 后端实体，分成两份的话，将来给 poi 加一个字段就要记得改两处。
+ */
+export interface AdminPoi extends Poi {
+  /** 1 上架 / 0 下架 */
+  status: number
+  source: ResourceSource
+  /** 中文名（城市数据包 / 运营新建）。**后端给**，前端不维护映射表 */
+  source_label: string
+  /**
+   * 承载率预警线（0.01~1.00）。null = 用 risk_rule 的全局阈值。
+   *
+   * 游客端拿不到这一列 —— 它是运营口径，只在管理端的编辑表单里被设置，
+   * 消费方是 RuleEngine 的 OVERLOAD 规则（景点级优先，无则回退全局）。
+   */
+  warning_threshold?: number | null
+  /** 配图张数（M9 的 poi_image）。列表上直接标出来 */
+  image_count: number
+  created_at?: string
+  updated_at?: string
+}
+
+/** 农产品在运营端的视图。与 {@link AdminPoi} 同一约定 */
+export interface AdminProduct extends Product {
+  /** 1 上架 / 0 下架 */
+  status: number
+  source: ResourceSource
+  source_label: string
+  data_origin?: string
+  source_url?: string
+  created_at?: string
+  updated_at?: string
+}
+
+// ============================================================
+// M10 续：景点评论
+// ============================================================
+
+/**
+ * 一条景点评论（游客端）。
+ *
+ * 刻意没有 user_id 与 status：接口只返回"已通过"的评论，
+ * 前端拿到的每一条都是可展示的，不需要再判一次 —— 判一次就多一个
+ * "忘了判"的机会。
+ */
+export interface PoiComment {
+  id: number
+  poi_id: string
+  /** 昵称。后端从 app_user 现取；用户没填昵称时后端兜底成「游客」 */
+  nickname: string
+  /** 1..5 */
+  rating: number
+  content: string
+  created_at: string
+}
+
+/**
+ * 评论列表 + 评分汇总。
+ *
+ * `average_rating` 为 null 表示"还没有任何评论"，**不是 0 分** ——
+ * 0 分是"所有人都打了最低分"（一个结论），没有评论是"没有数据"（另一个结论）。
+ * 与承载率读不到时显示「—」而不是 0% 是同一条取舍。
+ */
+export interface PoiCommentList {
+  items: PoiComment[]
+  /** 已通过评论总条数（不是 items.length —— 列表有显示上限） */
+  total: number
+  average_rating: number | null
+}
+
+/** 评论状态。与后端 PoiComment.STATUS_* 一一对应 */
+export type CommentStatus = 'PENDING' | 'APPROVED' | 'HIDDEN'
+
+/** 管理端的评论视图。比游客端多出「挂在哪个景点」「什么状态」「谁发的」 */
+export interface AdminComment {
+  id: number
+  poi_id: string
+  /** 景点名。后端补；资源被换掉时可能为 null，前端回落到 poi_id */
+  poi_name?: string | null
+  user_id: number
+  nickname: string
+  rating: number
+  content: string
+  status: CommentStatus
+  /** 中文名（待审核 / 已通过 / 已隐藏）。**后端给**，前端不映射 */
+  status_label: string
+  created_at: string
+  updated_at?: string
 }
 

@@ -61,8 +61,12 @@ public class PoiServiceImpl implements PoiService {
     @Override
     public PoiDetailVO getPoiDetail(String id) {
         Poi poi = poiMapper.selectById(id);
-        if (poi == null) {
-            throw new BizException(ErrorCode.NOT_FOUND, "资源不存在：" + id);
+        // ★ 下架的资源对游客不存在（M10）。
+        //   判据必须是 status，不能只是"查得到" —— 否则运营下架一条资源后，
+        //   它的详情页还能靠收藏夹/直链打开，"用户端只展示上架状态"就只对列表成立。
+        //   文案把"已下架"说出来：运营自己排查时能一眼分清是删了还是下架了。
+        if (poi == null || !Integer.valueOf(1).equals(poi.getStatus())) {
+            throw new BizException(ErrorCode.NOT_FOUND, "资源不存在或已下架：" + id);
         }
 
         List<PoiRelation> relations = poiRelationMapper.selectList(
@@ -82,9 +86,13 @@ public class PoiServiceImpl implements PoiService {
         Map<String, List<RelationVO>> grouped = new HashMap<>();
         for (PoiRelation r : relations) {
             Poi target = targetMap.get(r.getToPoiId());
-            // 目标被下架或删除时跳过。关系表里可能留着旧引用，
-            // 不能让一条悬空引用把整个详情页打挂。
-            if (target == null) {
+            // 目标被删除**或下架**时跳过。关系表里可能留着旧引用，而目标本身
+            // 也可能被运营下架 —— 两种都不该出现在游客眼前。
+            // ★ 原先这里只判了 `target == null`，注释却写着"目标被下架或删除时跳过"，
+            //   是名不副实的：下架的景点照样从别处的「附近」里漏出去，游客能点进详情页。
+            //   M10 补上 status 判断时才发现（当时为了给运营"下架"这个动作，
+            //   才第一次让 status=0 成为可达状态）。
+            if (target == null || !Integer.valueOf(1).equals(target.getStatus())) {
                 continue;
             }
             grouped.computeIfAbsent(r.getRelationType(), k -> new ArrayList<>()).add(toRelationVO(r, target));
@@ -133,7 +141,9 @@ public class PoiServiceImpl implements PoiService {
         v.setName(p.getName());
         v.setBusinessType(p.getBusinessType());
         v.setDistrict(p.getDistrict());
+        v.setAddress(p.getAddress());
         v.setLevel(p.getLevel());
+        v.setPhone(p.getPhone());
         v.setLng(VoUtils.toDouble(p.getLng()));
         v.setLat(VoUtils.toDouble(p.getLat()));
         v.setTicketPrice(VoUtils.toDouble(p.getTicketPrice()));
@@ -142,6 +152,7 @@ public class PoiServiceImpl implements PoiService {
         v.setCapacity(p.getCapacity());
         v.setTags(VoUtils.splitTags(p.getTags()));
         v.setSummary(p.getSummary());
+        v.setDetail(p.getDetail());
         v.setScene(p.getScene());
         v.setDataOrigin(p.getDataOrigin());
         v.setSourceUrl(p.getSourceUrl());

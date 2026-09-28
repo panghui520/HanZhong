@@ -1,6 +1,7 @@
 package com.hanyou.brain.service.support;
 
 import java.util.Collection;
+import java.util.Collections;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -44,7 +45,16 @@ public class NameResolver {
     public Map<String, String> poiNames(Collection<String> ids) {
         Set<String> keys = clean(ids);
         if (keys.isEmpty()) {
-            return Map.of();
+            // ★ 刻意不用 Map.of()。它返回的不可变 Map 在 get(null) 时抛
+            // NullPointerException，而调用方拿的 id **真的可能是 null**：
+            // 农产品只要挂体验锚点就不必挂产地（见 V2 的 chk_product_traceable），
+            // 那种行 poi_id 就是 null。一旦某个查询返回的产品恰好全都没挂产地，
+            // keys 为空 -> 这里返回 Map.of() -> 调用方 get(null) -> 整个接口报 9000
+            // 「服务内部错误」，而真正的原因是"这批产品都没产地"，极难定位。
+            // Collections.emptyMap() 的 get 对任何 key（含 null）都返回 null。
+            //
+            // 实测踩过：M10 新增一条只挂体验的农产品，接口直接 9000。
+            return Collections.emptyMap();
         }
         // 只取 id 与 name 两列：列表页补名字不需要把 summary、坐标一起拖回来
         List<Poi> rows = poiMapper.selectList(new LambdaQueryWrapper<Poi>()
@@ -57,7 +67,16 @@ public class NameResolver {
     public Map<String, String> experienceNames(Collection<String> ids) {
         Set<String> keys = clean(ids);
         if (keys.isEmpty()) {
-            return Map.of();
+            // ★ 刻意不用 Map.of()。它返回的不可变 Map 在 get(null) 时抛
+            // NullPointerException，而调用方拿的 id **真的可能是 null**：
+            // 农产品只要挂体验锚点就不必挂产地（见 V2 的 chk_product_traceable），
+            // 那种行 poi_id 就是 null。一旦某个查询返回的产品恰好全都没挂产地，
+            // keys 为空 -> 这里返回 Map.of() -> 调用方 get(null) -> 整个接口报 9000
+            // 「服务内部错误」，而真正的原因是"这批产品都没产地"，极难定位。
+            // Collections.emptyMap() 的 get 对任何 key（含 null）都返回 null。
+            //
+            // 实测踩过：M10 新增一条只挂体验的农产品，接口直接 9000。
+            return Collections.emptyMap();
         }
         List<Experience> rows = experienceMapper.selectList(new LambdaQueryWrapper<Experience>()
                 .select(Experience::getId, Experience::getName)

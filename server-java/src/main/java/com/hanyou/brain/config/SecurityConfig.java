@@ -72,6 +72,14 @@ public class SecurityConfig {
 
                         // ---------------- 公开：M1 统一资源 ----------------
                         // 这些是游客端的浏览能力，登录与否都能看。M8 不改变它们的行为。
+                        //
+                        // /api/pois/** 同时也覆盖了 M10 续的景点评论列表
+                        // （GET /api/pois/{id}/comments）—— 看评论与看景点是一回事，
+                        // 要求登录等于把"这地方怎么样"变成只有注册用户才看得到的信息。
+                        //
+                        // 发表评论是 POST /api/pois/{id}/comments，**不在**这条白名单里
+                        // （这里限定了 GET），会落到下面的 anyRequest().authenticated()。
+                        // 发表要有作者，匿名评论在这个系统里没有归属。
                         .requestMatchers(HttpMethod.GET,
                                 "/api/city",
                                 "/api/pois", "/api/pois/**")
