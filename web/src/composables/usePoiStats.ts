@@ -75,32 +75,64 @@ export function usePoiStats() {
     return s?.has_data ? s.capacity_usage : undefined
   }
 
-  /** 承载率文案。取不到时给"—"，不要显示成 0% */
+  /**
+   * 拥挤度文案。
+   *
+   * ★ 2026-09-28 面向游客：改成**定性词**，不再输出"23%"这种当日占用率。
+   *   百分比是运营与答辩口径（管理端仍能看到原值），游客需要的是
+   *   "现在去挤不挤"这个结论。取不到时给"—"，不要显示成"人少"——
+   *   那是在替一个未知状态下结论。
+   */
   function usageTextOf(poiId: string): string {
-    const u = usageOf(poiId)
-    return u == null ? '—' : `${Math.round(u * 100)}%`
+    return crowdWord(usageOf(poiId))
   }
 
   /**
    * 拥挤档位。`unknown` 与 `ok` 必须分开：
    * 把"读不到"归到"舒适"会让用户以为已经确认过很空。
    */
-  function levelOf(poiId: string): 'ok' | 'warn' | 'danger' | 'unknown' {
-    const u = usageOf(poiId)
-    if (u == null) return 'unknown'
-    if (u >= 1) return 'danger'
-    if (u >= 0.8) return 'warn'
-    return 'ok'
+  function levelOf(poiId: string): CrowdLevel {
+    return crowdLevelOf(usageOf(poiId))
   }
 
   return { byId, loaded, statOf, usageOf, usageTextOf, levelOf, reload: reloadPoiStats }
 }
 
-/** 拥挤档位的中文标签。`unknown` 单独一档 */
-export const LOAD_LEVEL_LABEL: Record<string, string> = {
-  ok: '舒适',
-  warn: '偏忙',
-  danger: '拥挤',
+/** 拥挤档位。`unknown` 必须与 `ok` 分开：读不到 ≠ 确认很空 */
+export type CrowdLevel = 'ok' | 'warn' | 'danger' | 'unknown'
+
+/**
+ * 占用率 → 拥挤档位。**唯一一份阈值**：详情页与探索页都走这里。
+ * ≥100% 人很多 / ≥80% 人较多 / 其余 人少。
+ */
+export function crowdLevelOf(u: number | undefined): CrowdLevel {
+  if (u == null) return 'unknown'
+  if (u >= 1) return 'danger'
+  if (u >= 0.8) return 'warn'
+  return 'ok'
+}
+
+/**
+ * 占用率 → 游客口径的定性词。
+ *
+ * 详情页自己算 usage（不经过全局单例），所以这里导出成一个**纯函数**，
+ * 免得两个页面各写一份阈值。
+ */
+export function crowdWord(u: number | undefined): string {
+  return LOAD_LEVEL_LABEL[crowdLevelOf(u)]
+}
+
+/**
+ * 拥挤档位的中文标签。`unknown` 单独一档。
+ *
+ * ★ 2026-09-28 面向游客：词从"舒适 / 偏忙 / 拥挤"换成更口语的
+ *   "人少 / 人较多 / 人很多"。这个常量只服务于游客端展示，不对外导出
+ *   （对外只用 `crowdWord` / `usageTextOf`）。
+ */
+const LOAD_LEVEL_LABEL: Record<string, string> = {
+  ok: '人少',
+  warn: '人较多',
+  danger: '人很多',
   unknown: '—',
 }
 

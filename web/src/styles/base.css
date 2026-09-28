@@ -204,9 +204,22 @@ select {
 .section-lg {
   padding: var(--sp-9) 0;
 }
-/* 大留白区块：整幅大图带 / 强调带 */
+/* 首页区块留白。
+ *
+ * ★ 这里原来是 var(--sp-10) = 上下各 128px，首页 5 个区块光 padding 就吃掉
+ *   1312px（≈1.5 屏），是"标题 → 巨大空白 → 内容"的主因。
+ *   实测该块高度里超过一半是空白：.ai-band 整块 654px，实际内容只有 398px。
+ *
+ * 72px 的依据：相邻两个区块各出 72px，合成 144px 的内容间隔 —— 足够区分模块，
+ * 又不会让用户觉得"滚了半天什么都没有"。区块之间**还要靠背景色变化和细分隔线**
+ * 形成边界（见 Home.vue 的 .ai-band / .rural-band / .value-band），
+ * 不能只靠留白，否则留白一旦收紧模块就糊在一起。
+ *
+ * 本类目前**只有 Home.vue 在用**（Explore/Goods/Itinerary 用的是 section/section-lg），
+ * 所以改它不会波及别的页面。
+ */
 .section-xl {
-  padding: var(--sp-10) 0;
+  padding: 72px 0;
 }
 .section-0 {
   padding: 0;
@@ -517,7 +530,10 @@ select {
     --fs-display: 30px;
     --fs-h1: 24px;
     --fs-h2: 19px;
-    --nav-h: 58px;
+    /* 手机上顶栏改成两行（品牌+操作 / 整行导航），58px 放不下。
+       这个变量同时被 Assistant / Checkout / PoiDetail 的 sticky 偏移复用
+       （top: calc(var(--nav-h) + …)），所以必须一起改，否则那些悬浮块会钻到导航下面。 */
+    --nav-h: 92px;
     --hero-h: 520px;
     --fs-mega: 34px;
   }

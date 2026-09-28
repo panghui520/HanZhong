@@ -323,13 +323,17 @@ class QaService:
         return "none"
 
     def _scope_text(self) -> str:
-        """知识库覆盖范围的一句话说明。给用户看，也塞进 constrained 的提示词。"""
+        """覆盖范围的一句话说明。给用户看，也塞进 constrained 的提示词。
+
+        ★ 面向游客（2026-09-28）：不再写"当前知识库覆盖…个资源点、款乡村产品"——
+        "知识库/资源点"是行业口径。改成"覆盖…以及 N 处好去处、M 款乡村好物"。
+        """
         by_type_docs = self.store.manifest().get("by_type_docs", {})
         return (
-            f"当前知识库覆盖{self.settings.city_name}的地理气候、历史文化、生态与物产等公开资料，"
-            f"以及 {by_type_docs.get('poi', 0)} 个资源点、"
+            f"覆盖{self.settings.city_name}的地理气候、历史文化、生态与物产等公开资料，"
+            f"以及 {by_type_docs.get('poi', 0)} 处好去处、"
             f"{by_type_docs.get('experience', 0)} 项乡村体验、"
-            f"{by_type_docs.get('product', 0)} 款乡村产品。"
+            f"{by_type_docs.get('product', 0)} 款乡村好物。"
         )
 
     def _resolve_sources(
@@ -390,33 +394,38 @@ class QaService:
 
     def _gaps_hint(self, gaps: Sequence[str]) -> str:
         """给前端的一句话提示。让用户知道被判定超出范围的是哪个词，
-        而不是笼统地说"不知道"——他可以换个说法再问。"""
+        而不是笼统地说"不知道"——他可以换个说法再问。
+
+        ★ 面向游客（2026-09-28）："知识库里没有…的记载"改成"资料里没有…的记载"。
+        """
         if not gaps:
             return ""
-        return "知识库里没有关于「" + "」「".join(gaps) + "」的记载"
+        return "资料里没有关于「" + "」「".join(gaps) + "」的记载"
 
     def _no_answer_text(self, question: str, gaps: Sequence[str], route: str) -> str:
-        """**离线**模式下答不了的两种情形。不能只说"不知道"——
-        要告诉用户离线模式的边界在哪、知识库覆盖了什么。
+        """**没有可用模型**时答不了的两种情形。不能只说"不知道"——
+        要告诉用户现在能答什么、不能答什么。
 
-        有模型时不会走到这里：`constrained` 交给模型说明"缺少依据"，
-        `general` 直接交给模型回答。
+        ★ 面向游客（2026-09-28）：原文案是"当前处于离线演示模式（未配置大模型），
+          我只能回答知识库覆盖的汉中问题…配置模型后它会说明知识库缺少哪部分依据"，
+          通篇是运行模式与实现口径。改成说人话，但**保留"能力受限"这个如实告知**
+          ——降级链的机制一行没动，只换了措辞。
         """
         scope = self._scope_text()
         tips = "\n".join(f"· {q}" for q in self.suggestions()[:4])
 
         if route == ROUTE_GENERAL:
             return (
-                "当前处于离线演示模式（未配置大模型），我只能回答知识库覆盖的汉中问题。\n\n"
+                "这一问不在我能核对的范围内 —— 我回答的是汉中相关的公开资料。\n\n"
                 f"{scope}\n\n"
                 f"你可以试试下面这些问题：\n{tips}"
             )
 
-        reason = self._gaps_hint(gaps) or "知识库里没有与这个问题相关的记载"
+        reason = self._gaps_hint(gaps) or "资料里没有与这个问题相关的记载"
         return (
             f"{reason}。\n\n"
-            f"当前处于离线演示模式（未配置大模型），这类问题无法展开回答 —— "
-            f"配置模型后它会说明知识库缺少哪部分依据，并回答其中通用的部分。\n\n"
+            "这类问题目前答不了：我只把资料里写得清楚的内容原样摘出来，"
+            "需要归纳、比较，或者资料里没写的部分，我不会替它编一个答案。\n\n"
             f"{scope}\n\n"
             f"你可以换个说法再问，或者试试下面这些问题：\n{tips}"
         )

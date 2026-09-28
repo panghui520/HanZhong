@@ -89,7 +89,7 @@ function startCooldown(seconds: number) {
  */
 function describe(e: unknown): string {
   if (e instanceof ApiError) {
-    if (e.code === -1) return '无法连接后端服务，请确认 server-java 已启动'
+    if (e.code === -1) return '暂时连不上服务，请稍后再试'
     if (e.code === -2) return '服务响应异常，请稍后重试'
     if (e.code === 4102) return '该邮箱已注册，请直接登录'
     if (e.code === 4103) return e.message || '发送过于频繁，请稍后再试'

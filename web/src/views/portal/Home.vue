@@ -2,14 +2,19 @@
 /**
  * Home —— 首页
  *
+ * ★ 定位：**面向游客的汉中文旅首页**，不是项目演示页、也不是技术介绍页。
+ *   所以这里只出现"游客能获得什么"，不出现"系统是怎么实现的"。
+ *   实现说明（承载余量、规则引擎、大模型边界、业务闭环、各服务的就绪状态）
+ *   一律留在管理端与答辩材料里 —— 那些词出现在首页就是演示页的味道。
+ *
  * 节奏（自上而下，靠"尺寸 + 留白 + 字号层级"形成落差，而不是每区放同样大小的卡片）：
- *   1. 超大轮播 Hero（满屏，深色压图）
- *   1.5 分流公告条（M5 续，有生效公告时才出现）
- *   2. 汉中精选目的地（大图主推 + 次级列表，左右不对称）
- *   3. AI 智能行程规划（浅色强调带，横向流程）
- *   4. 乡村体验（深绿整幅带，大留白）
- *   5. 旅行足迹与乡村好物（体验锚定，不是货架）
- *   6. 智慧文旅平台价值（三栏，收束）
+ *   1.  超大轮播 Hero（满屏，深色压图）
+ *   1.5 今日游览提示（M5 续，有生效公告时才出现）
+ *   2.  汉中精选目的地（大图主推 + 次级列表，左右不对称）
+ *   3.  智能行程规划（浅色强调带，横向四步）
+ *   4.  乡村体验（深绿整幅带）—— 讲"避开拥挤"，不讲"分流"
+ *   5.  汉中特色好物（把味道带回家）
+ *   6.  离境复购（三栏，收束）
  *
  * 数据全部来自 getCityPack()（M1 + M2 已有接口），本文件只做取数与排版，
  * 不新增任何后端接口、不改数据库。
@@ -68,36 +73,60 @@ const goods = computed<Product[]>(() => {
   return picked
 })
 
+/**
+ * 底部三个数字。**标签要说游客的话**：
+ * 原来写的是"文旅资源点"（行业口径），游客不会这么叫自己想去的地方。
+ */
 const stats = computed(() => [
-  { label: '文旅资源点', value: data.value?.pois.length ?? 0, unit: '处' },
-  { label: '乡村体验项目', value: experiences.value.length, unit: '项' },
-  { label: '乡村特色产品', value: products.value.length, unit: '款' },
+  { label: '汉中好去处', value: data.value?.pois.length ?? 0, unit: '处' },
+  { label: '乡村体验', value: experiences.value.length, unit: '项' },
+  { label: '乡村好物', value: products.value.length, unit: '款' },
 ])
 
-/** AI 行程规划的四步：规则判定 + LLM 生成，讲清边界 */
+/**
+ * 传给 Hero 的三个数字。
+ * 数据没到之前给**空数组**（Hero 里 `v-if="stats.length"` 整行不渲染），
+ * 而不是给 0 —— 否则首屏会先闪一下"0 处 / 0 项 / 0 款"再跳成真实值。
+ */
+const heroStats = computed(() => (data.value ? stats.value : []))
+
+/**
+ * AI 行程规划的四步。
+ *
+ * ★ 这一栏原来是给评委看的实现说明（"召回候选 / 承载过滤 / LLM 只负责写成可读方案"），
+ *   游客读不懂也不需要懂。改成**"你会得到什么"**：
+ *   每一步的主语都是"你"，描述的是游客拿到的东西，而不是系统的内部步骤。
+ *   （实现细节留给答辩材料，不进游客首页。）
+ */
 const flow = [
-  { no: '01', title: '理解需求', desc: '天数、同行人群、步行意愿、兴趣偏好' },
-  { no: '02', title: '召回候选', desc: '按行政区、类型、距离筛出可达资源池' },
-  { no: '03', title: '承载过滤', desc: '读取当日余量，高位点降权、闲时点前置' },
-  { no: '04', title: '生成行程', desc: 'LLM 只负责写成可读方案与推荐理由' },
+  { no: '01', title: '说说你的行程', desc: '天数、同行的人、想走多快、偏爱什么' },
+  { no: '02', title: '挑出合适的地方', desc: '景点、美食、住宿、乡村体验，按偏好来选' },
+  { no: '03', title: '避开人多的时段', desc: '结合客流，把热门点位排到更从容的时候' },
+  { no: '04', title: '给你能照着走的方案', desc: '每天的动线、停留时长与推荐理由' },
 ]
 
-/** 平台价值三栏 */
-const pillars = [
+/**
+ * 离境复购三栏。
+ *
+ * ★ 替换掉原来的"智慧文旅平台价值"三栏（承载失衡靠分流/体验是消费入口/一次到访延伸成消费链）。
+ *   那三栏讲的是**系统的设计主张**，是答辩语言；这里讲的是**游客回家之后能得到什么**。
+ *   事实依据都来自数据包：每款产品都有 origin_village 与所属体验，可核对。
+ */
+const repurchase = [
   {
     no: '01',
-    title: '承载失衡，靠分流而不是靠限流',
-    desc: '景区高位时不是简单劝返，而是把客流导向车程相邻、承载充足的乡村点，让溢出需求有去处、乡村有客源。',
+    title: '认准你买过的那一款',
+    desc: '每一样好物都记着它的产地与作坊。想再买时循着同一款下单就行，不必重新挑一遍。',
   },
   {
     no: '02',
-    title: '乡村体验，是可锚定的消费入口',
-    desc: '每一样乡村好物都挂在一次真实体验或一个产地上，不做孤立货架，让"买"这件事有记忆背书。',
+    title: '从同一片产地寄出',
+    desc: '茶叶、黑米、腊味、橘酱都从村里直接发出，不经过层层转手，价格和来路都清楚。',
   },
   {
     no: '03',
-    title: '一次到访，延伸成持续消费链',
-    desc: '旅行足迹沉淀为长期客源。游客离境之后仍可循着体验复购，乡村收入不再随花期与旺季起落。',
+    title: '过了季节也买得到',
+    desc: '油菜花只开一个月，茶园与作坊却一年都在。这次没赶上，回家下单也不耽误。',
   },
 ]
 
@@ -156,7 +185,7 @@ onUnmounted(() => io?.disconnect())
 <template>
   <div ref="root" class="home">
     <!-- ============ 1. 超大轮播 Hero ============ -->
-    <HeroCarousel />
+    <HeroCarousel :stats="heroStats" />
 
     <!-- ============ 1.5 分流公告（M5 续） ============
          排在 Hero 之后、所有内容之前：这是整站唯一一条"系统主动对游客说话"的
@@ -184,7 +213,7 @@ onUnmounted(() => io?.disconnect())
         <SectionHead
           eyebrow="汉中精选目的地"
           title="山、水、关、城，都在一条动线上"
-          desc="从秦岭深处的云海，到汉江两岸的古镇与栈道。资源按距离与承载余量编排，不是一张清单。"
+          desc="从秦岭深处的云海，到汉江两岸的古镇与栈道。挑出最值得先去的几处，帮你把汉中一次看够。"
           size="xl"
           more-text="查看全部资源"
           more-to="/explore"
@@ -203,8 +232,10 @@ onUnmounted(() => io?.disconnect())
         </div>
 
         <div v-else-if="isEmpty(featureScenic)" class="empty">
-          <div class="empty__title">暂无景区数据</div>
-          <div class="empty__desc">请确认后端服务已启动，且城市数据包已导入</div>
+          <div class="empty__title">暂时没有可推荐的目的地</div>
+          <!-- ★ 面向游客：这里原来写"请确认后端服务已启动，且城市数据包已导入"——
+               那是开发自检话术。游客看不懂，也不该看到。真正的接口报错走上一个分支。 -->
+          <div class="empty__desc">内容可能正在更新，稍后再来看看，或先去「探索汉中」翻一翻。</div>
         </div>
 
         <div v-else class="dest__grid reveal">
@@ -280,20 +311,23 @@ onUnmounted(() => io?.disconnect())
       </div>
     </section>
 
-    <!-- ============ 3. AI 智能行程规划 ============ -->
+    <!-- ============ 3. AI 智能行程规划 ============
+         ★ 这一块原来讲的是实现（承载余量 / 规则判定 / 大模型各守边界），
+           是写给评委看的。现在整块改成"游客能得到什么"：
+           标题说的是体验，四步说的是游客拿到的东西。 -->
     <section class="section-xl ai-band">
       <div class="container">
         <div class="ai__grid">
           <div class="ai__copy reveal">
-            <span class="eyebrow">AI 智能行程规划</span>
-            <h2 class="h1 ai__title">规划不只考虑"去哪里"，<br />还要考虑"哪里装得下"</h2>
+            <span class="eyebrow">智能行程规划</span>
+            <h2 class="h1 ai__title">让每一段汉中旅程，<br />都恰到好处</h2>
             <p class="lead ai__desc">
-              系统在生成动线时同步读取各资源点的承载余量，把高位景区的一部分客流，
-              顺势引导到承载充足、路程相邻的乡村体验点。判定用规则，生成与解释用大模型，两者各守边界。
+              告诉我出行时间、同行人数和偏好，帮你安排景点、美食、住宿与乡村体验。
+              不用自己排表、不用查攻略，拿到一份能直接照着走的行程。
             </p>
             <div class="ai__cta">
-              <router-link to="/itinerary" class="btn btn-primary btn-lg">生成我的行程</router-link>
-              <router-link to="/assistant" class="btn btn-ghost btn-lg">问智脑几个问题</router-link>
+              <router-link to="/itinerary" class="btn btn-primary btn-lg">开始规划我的行程</router-link>
+              <router-link to="/assistant" class="btn btn-ghost btn-lg">先问问有什么好玩的</router-link>
             </div>
           </div>
 
@@ -310,16 +344,19 @@ onUnmounted(() => io?.disconnect())
       </div>
     </section>
 
-    <!-- ============ 4. 乡村体验（深绿整幅带） ============ -->
+    <!-- ============ 4. 乡村体验（深绿整幅带） ============
+         ★ 原来这块讲的是"分流"（把溢出的客流送进村子 / 承载吃紧 / 车程 30–60 分钟匹配），
+           是系统的调度逻辑。现在换成游客视角：**避开拥挤**，说的是游客得到的从容。
+           分流的机制留在答辩材料里，首页不出现"承载""溢出""调度"这些词。 -->
     <section class="section-xl rural-band">
       <div class="container">
         <SectionHead
-          eyebrow="乡村振兴 · 乡村体验"
-          title="把溢出的客流，送进秦岭深处的村子"
-          desc="当核心景区承载吃紧，系统会匹配车程 30–60 分钟内的乡村点，用一次真实的乡村体验承接需求——茶园、稻田、橘园、非遗工坊。"
+          eyebrow="汉中乡村体验"
+          title="避开拥挤，把时间留给风景"
+          desc="景区人多的日子，不如拐进山里。茶园、稻田、橘园、非遗工坊都在一小时车程内，人少、安静，能坐下来慢慢待上半天。"
           size="xl"
           tone="light"
-          more-text="去看乡村体验"
+          more-text="看看乡村体验"
           more-to="/explore"
         />
 
@@ -352,33 +389,31 @@ onUnmounted(() => io?.disconnect())
         </div>
 
         <p class="rural__note reveal">
-          乡村体验点不计入"热门榜"，而是按承载余量与路程相邻度匹配——这是分流的落点。
+          这些村子大多不在热门榜单上，却都离景区不远。赶上人多的时候来这里，反而更自在。
         </p>
       </div>
     </section>
 
-    <!-- ============ 5. 旅行足迹与乡村好物 ============ -->
+    <!-- ============ 5. 汉中特色好物 ============
+         ★ 三处改动：
+           ① 标题按用户要求突出"把汉中的味道带回家"（原来偏文艺的"你走过的那片山"
+              移到正文里保留）；
+           ② 原来开头的"溯源条"（到访汉中→乡村体验→带走好物→离境复购）挪到下一块
+              「离境复购」去 —— 它讲的是整段旅程，放在"复购"那块才顺，也让好物区
+              更聚焦在"有什么、多少钱"；
+           ③ 删掉页尾那句"产品不设独立商城入口…这是刻意的设计取舍"（开发说明）。
+           另外把 more-to 从 /assistant 改成 /goods —— "了解更多"该去好物页，
+           原来指到 AI 问答是错的。 -->
     <section class="section-xl goods">
       <div class="container">
         <SectionHead
-          eyebrow="旅行足迹 · 乡村好物"
-          title="带回家的，是你走过的那片山"
-          desc="每一样好物都锚定在一次乡村体验或一个产地上。不是货架商品，而是可以被回忆复购的旅行余韵。"
+          eyebrow="汉中特色好物"
+          title="把汉中的味道，带回家"
+          desc="汉中仙毫、洋县黑米、镇巴腊肉、略阳乌鸡——都来自你走过的那片山。由村里的合作社和农户做出来，带回家就能接着吃。"
           size="xl"
-          more-text="了解更多"
-          more-to="/assistant"
+          more-text="看全部好物"
+          more-to="/goods"
         />
-
-        <!-- 溯源条：把「体验 → 好物 → 复购」画出来 -->
-        <div class="trace reveal">
-          <span class="trace__step">到访汉中</span>
-          <span class="trace__line" />
-          <span class="trace__step">乡村体验</span>
-          <span class="trace__line" />
-          <span class="trace__step">带走好物</span>
-          <span class="trace__line" />
-          <span class="trace__step trace__step--end">离境复购</span>
-        </div>
 
         <div v-if="loading" class="grid grid-4">
           <div v-for="i in 4" :key="i" class="skeleton" style="height: 320px; border-radius: 10px" />
@@ -388,7 +423,7 @@ onUnmounted(() => io?.disconnect())
           <article v-for="g in goods" :key="g.id" class="gcard reveal">
             <div class="gcard__art-wrap">
               <!-- 产品没有自己的图片，用产地乡村点的实拍图 ——
-                   "带回家的，是你走过的那片山"，这里正是要显示走过的那片山 -->
+                   标题说的"你走过的那片山"，这里正是要显示那片山 -->
               <PoiImage
                 :poi-id="g.poi_id"
                 :scene="g.scene"
@@ -409,50 +444,53 @@ onUnmounted(() => io?.disconnect())
             </div>
           </article>
         </div>
-
-        <p class="goods__note muted small">
-          产品不设独立商城入口，全部挂靠体验或产地——这是刻意的设计取舍。
-        </p>
       </div>
     </section>
 
-    <!-- ============ 6. 智慧文旅平台价值 ============ -->
+    <!-- ============ 6. 离境复购 ============
+         ★ 这一块原来是「智慧文旅平台价值」，讲的是系统的设计主张
+           （"传统智慧文旅止步于…汉游智脑把链条向后延伸…"），
+           底下还挂着一条七步"业务闭环"流程（游客需求→AI 规划→乡村引流→…→AI 运营归因）。
+           这两样都是答辩材料，游客既读不懂也不关心，全部删除。
+           整块改成游客视角的「离境复购」：回家之后还能买到什么、怎么买。
+
+         ★ 顺带两件事：
+           ① 好物区那条溯源条挪到这里 —— 它讲的是整段旅程，收在"复购"这块才顺；
+           ② 末步"离境复购"改成"回家复购"。"离境"是行业口径，游客嘴里说的是"回家"。
+           ③ 删掉"运营管理入口"按钮：Footer 的「运营方」栏已经有管理端入口了，
+              首页不该再挂一个面向评委的按钮（这正是"演示页"的痕迹）。 -->
     <section class="section-xl value-band">
       <div class="container">
         <SectionHead
-          eyebrow="智慧文旅平台价值"
-          title="文旅的价值，不该在游客离境那一刻归零"
-          desc="传统智慧文旅止步于「游客—景区—离场」。汉游智脑把链条向后延伸：乡村体验成为锚点，特色产品成为可带走的延续，运营数据再回流到资源匹配。"
+          eyebrow="离境复购"
+          title="回家之后，汉中的味道还在"
+          desc="旅程会结束，味觉记得住。离开汉中以后，随时可以循着买过的那一款再下一单，从同一片产地、同一家作坊寄到家。"
           size="xl"
           align="center"
         />
 
+        <!-- 旅程线：说的是游客自己走过的四步，不是系统的链路 -->
+        <div class="trace reveal">
+          <span class="trace__step">到访汉中</span>
+          <span class="trace__line" />
+          <span class="trace__step">走进村子</span>
+          <span class="trace__line" />
+          <span class="trace__step">带走好物</span>
+          <span class="trace__line" />
+          <span class="trace__step trace__step--end">回家复购</span>
+        </div>
+
         <div class="pillars">
-          <article v-for="p in pillars" :key="p.no" class="pillar reveal">
+          <article v-for="p in repurchase" :key="p.no" class="pillar reveal">
             <span class="num pillar__no">{{ p.no }}</span>
             <h3 class="h3 pillar__title">{{ p.title }}</h3>
             <p class="pillar__desc">{{ p.desc }}</p>
           </article>
         </div>
 
-        <!-- 闭环：收束为一条细线流程 -->
-        <div class="loop reveal">
-          <span class="loop__label">业务闭环</span>
-          <ol class="loop__list">
-            <li v-for="(t, i) in ['游客需求', 'AI 规划', '乡村引流', '乡村体验', '产品消费', '离境复购']" :key="t" class="loop__item">
-              <span class="num loop__no">{{ i + 1 }}</span>
-              <span class="loop__text">{{ t }}</span>
-            </li>
-            <li class="loop__item loop__item--ai">
-              <span class="num loop__no">7</span>
-              <span class="loop__text">AI 运营归因 → 优化匹配</span>
-            </li>
-          </ol>
-        </div>
-
         <div class="value__cta">
-          <router-link to="/login" class="btn btn-primary btn-lg">登录 / 注册</router-link>
-          <router-link to="/login?role=admin" class="btn btn-ghost btn-lg">运营管理入口</router-link>
+          <router-link to="/goods" class="btn btn-primary btn-lg">去看看能带什么</router-link>
+          <router-link to="/orders" class="btn btn-ghost btn-lg">我的订单</router-link>
         </div>
       </div>
     </section>
@@ -671,8 +709,8 @@ onUnmounted(() => io?.disconnect())
 
 /* 概览数字：细线分隔，不套卡片 */
 .stats {
-  margin-top: var(--sp-8);
-  padding-top: var(--sp-6);
+  margin-top: var(--sp-6);
+  padding-top: var(--sp-5);
   border-top: 1px solid var(--line);
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -716,19 +754,19 @@ onUnmounted(() => io?.disconnect())
 .ai__grid {
   display: grid;
   grid-template-columns: minmax(0, 1.05fr) minmax(0, 0.95fr);
-  gap: var(--sp-9);
+  gap: var(--sp-8);
   align-items: center;
 }
 .ai__title {
-  margin-top: var(--sp-5);
+  margin-top: var(--sp-4);
   color: var(--ink-900);
 }
 .ai__desc {
-  margin-top: var(--sp-5);
+  margin-top: var(--sp-4);
   max-width: 34em;
 }
 .ai__cta {
-  margin-top: var(--sp-7);
+  margin-top: var(--sp-6);
   display: flex;
   gap: var(--sp-3);
   flex-wrap: wrap;
@@ -783,6 +821,9 @@ onUnmounted(() => io?.disconnect())
 .rural-band {
   background: var(--brand-800);
   color: var(--brand-100);
+  /* 整幅深色带比普通区块多给一点上下留白（88 vs 72）：
+     色块本身已经是一次强分隔，内容再贴边会显得局促。 */
+  padding: 88px 0;
 }
 .rural__grid {
   display: grid;
@@ -856,8 +897,8 @@ onUnmounted(() => io?.disconnect())
   overflow: hidden;
 }
 .rural__note {
-  margin-top: var(--sp-6);
-  padding-top: var(--sp-5);
+  margin-top: var(--sp-5);
+  padding-top: var(--sp-4);
   border-top: 1px solid rgba(219, 233, 227, 0.14);
   font-size: var(--fs-sm);
   color: var(--brand-300);
@@ -880,7 +921,7 @@ onUnmounted(() => io?.disconnect())
   background: var(--paper-2);
   border: 1px solid var(--line-soft);
   border-radius: var(--r-lg);
-  margin-bottom: var(--sp-6);
+  margin-bottom: var(--sp-5);
 }
 .trace__step {
   font-size: var(--fs-sm);
@@ -975,16 +1016,17 @@ onUnmounted(() => io?.disconnect())
   letter-spacing: 0.06em;
   color: var(--brand-500);
 }
-.goods__note {
-  margin-top: var(--sp-6);
-  text-align: center;
-}
 
 /* ============================================================
-   6. 平台价值
+   6. 离境复购（原「平台价值」）
    ============================================================ */
 .value-band {
   background: var(--paper-3);
+  padding: 88px 0;
+  /* goods 是 --paper(#faf8f3)、这里是 --paper-3(#ece8de)，两者色差很小，
+     只靠背景分不出模块边界 —— 补一条极细分割线把边界落实。
+     这正是"不要单纯依靠巨大留白来区分 section"的落点。 */
+  border-top: 1px solid var(--line);
 }
 .pillars {
   display: grid;
@@ -1012,54 +1054,11 @@ onUnmounted(() => io?.disconnect())
   color: var(--ink-500);
 }
 
-/* 闭环细线 */
-.loop {
-  margin-top: var(--sp-9);
-  padding-top: var(--sp-6);
-  border-top: 1px solid var(--line);
-}
-.loop__label {
-  font-size: var(--fs-cap);
-  letter-spacing: 0.18em;
-  text-transform: uppercase;
-  color: var(--warm-500);
-  font-weight: 600;
-}
-.loop__list {
-  margin-top: var(--sp-5);
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--sp-3) var(--sp-5);
-}
-.loop__item {
-  display: flex;
-  align-items: baseline;
-  gap: var(--sp-2);
-  padding-right: var(--sp-5);
-  border-right: 1px solid var(--line);
-}
-.loop__item:last-child {
-  border-right: none;
-  padding-right: 0;
-}
-.loop__no {
-  font-size: 11px;
-  font-weight: 700;
-  color: var(--warm-400);
-  letter-spacing: 0.1em;
-}
-.loop__text {
-  font-size: var(--fs-sm);
-  font-weight: 600;
-  color: var(--ink-700);
-}
-.loop__item--ai .loop__no,
-.loop__item--ai .loop__text {
-  color: var(--gold-600);
-}
+/* 「业务闭环」七步流程的样式已随该模块一起删除（游客不需要看系统链路）。
+   它的位置改由上面的 .trace 旅程线承担 —— 那是游客自己走过的四步。 */
 
 .value__cta {
-  margin-top: var(--sp-8);
+  margin-top: var(--sp-6);
   display: flex;
   gap: var(--sp-3);
   justify-content: center;
@@ -1121,6 +1120,14 @@ onUnmounted(() => io?.disconnect())
 }
 
 @media (max-width: 720px) {
+  /* 整幅带在桌面端给 88px（比普通区块多，因为色块本身就是分隔），
+     但手机上要跟着一起收到 48px —— 不然全页最"空"的反而是这两块深色带。
+     Home.vue 的 scoped 样式在 base.css 之后加载，所以必须在这里显式覆盖，
+     只靠 base.css 里的 .section-xl 规则压不住。 */
+  .rural-band,
+  .value-band {
+    padding: var(--sp-7) 0;
+  }
   .feat,
   .dest__sk-main {
     min-height: 340px;
@@ -1155,10 +1162,6 @@ onUnmounted(() => io?.disconnect())
   }
   .trace {
     padding: var(--sp-4);
-  }
-  .loop__item {
-    border-right: none;
-    padding-right: 0;
   }
   .value__cta .btn {
     flex: 1 1 auto;

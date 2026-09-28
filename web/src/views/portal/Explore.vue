@@ -32,7 +32,7 @@ import PoiImage from '@/components/PoiImage.vue'
 import SectionHead from '@/components/SectionHead.vue'
 import { getCityPack } from '@/api/citypack'
 import { isEmpty, useAsync } from '@/composables/useAsync'
-import { LOAD_LEVEL_LABEL, usePoiStats } from '@/composables/usePoiStats'
+import { usePoiStats } from '@/composables/usePoiStats'
 import { useReveal } from '@/composables/useReveal'
 import { BUSINESS_LABEL, BUSINESS_ORDER, type BusinessType, type Poi } from '@/types'
 
@@ -92,14 +92,15 @@ const THEMES: { key: ThemeKey; label: string }[] = [
  * 同一个东西两个名字，用户在两页之间来回看会以为不是一回事。
  */
 
-/** 每个类别一句话说明。文案讲的是"这类资源在调度网络里扮演什么角色" */
+/** 每个类别一句话说明。★ 面向游客：讲"这一类里有什么、适合什么时候去"，
+ *  不讲"这类资源在调度网络里扮演什么角色"（那是方案书口径）。 */
 const CAT_DESC: Record<BusinessType, string> = {
-  SCENIC: '秦岭与汉江之间的自然人文景观，是最需要做承载力分流的入口',
-  RURAL_SPOT: '乡村旅游示范村与非遗工坊，离热门景区不远，是分流承接的主力',
-  FOOD: '市井小吃与地方菜，多在城区与县城，适合与山水行程错峰组合',
-  LODGING: '民宿、乡村会客厅与县城酒店，是过夜消费与次日分流的落点',
-  TRANSPORT: '高铁站、客运枢纽与旅游专线，决定客流怎么进城、往哪散',
-  SHOPPING: '特产与手作门店，与乡村好物互为补充',
+  SCENIC: '秦岭与汉江之间的自然人文景观，来汉中先看这一片',
+  RURAL_SPOT: '乡村旅游示范村与非遗工坊，离热门景区不远，人少、待得住',
+  FOOD: '市井小吃与地方菜，多在城区与县城，适合和山水行程错开时间',
+  LODGING: '民宿、乡村会客厅与县城酒店，住哪儿往往决定第二天去哪儿',
+  TRANSPORT: '高铁站、客运枢纽与旅游专线，决定怎么进城、往哪儿走',
+  SHOPPING: '特产与手作门店，和乡村好物互为补充',
 }
 
 const allPois = computed<Poi[]>(() => data.value?.pois ?? [])
@@ -305,15 +306,16 @@ function scrollToGrid() {
       <div class="exbanner__veil" />
       <div class="container exbanner__inner">
         <span class="eyebrow eyebrow--light">目的地探索 · 汉中</span>
-        <h1 class="display exbanner__title">把一城资源<br />看成一张可以调度的网络</h1>
+        <h1 class="display exbanner__title">汉中的好看好玩<br />一次看全</h1>
         <p class="exbanner__desc">
-          先按类别看：景点、乡村、餐饮、住宿、交通各自成一片。每一处都带着容量上限与当日占用率 ——
-          这正是"把客流从拥挤处导向有余处"的依据。
+          按你想去的那一类翻：景区、乡村、餐饮、住宿、交通各自成一片。
+          每一处都标了今天人多不多，人少的那几处会往前放 ——
+          想清静一点，照着排就行。
         </p>
 
         <dl v-if="!loading" class="exstats">
           <div class="exstats__i">
-            <dt>统一资源</dt>
+            <dt>汉中好去处</dt>
             <dd class="num">{{ stats.total }}</dd>
           </div>
           <div class="exstats__i">
@@ -321,7 +323,7 @@ function scrollToGrid() {
             <dd class="num">{{ stats.districts }}</dd>
           </div>
           <div class="exstats__i">
-            <dt>乡村承接点</dt>
+            <dt>乡村体验点</dt>
             <dd class="num">{{ stats.rural }}</dd>
           </div>
           <div class="exstats__i">
@@ -353,7 +355,7 @@ function scrollToGrid() {
         <SectionHead
           eyebrow="第一步 · 选类别"
           title="先选一类，再看具体去处"
-          desc="类别按游客的检索习惯划分，不混着铺。条数是数据包里的真实条数，不是写死的。"
+          desc="按旅行时最常用的分法归类，一类一类看，不混着铺。"
         />
 
         <div class="cats">
@@ -414,7 +416,7 @@ function scrollToGrid() {
         <SectionHead
           eyebrow="本期主推"
           :title="featTitle"
-          desc="主推依据是承载力与等级：把当前最拥挤或最有代表性的那一条放在这里，而不是随机取一条。"
+          desc="挑一条最值得先去的放在这里：要么是汉中的招牌，要么是当下人少、正好去的时候。"
           size="md"
         />
 
@@ -440,8 +442,7 @@ function scrollToGrid() {
               <p class="feat__summary">{{ featured.summary }}</p>
               <div class="feat__foot">
                 <span class="feat__load" :class="`feat__load--${usageLevel(featured)}`">
-                  <i class="feat__dot" />当前承载 {{ usageText(featured) }} ·
-                  {{ LOAD_LEVEL_LABEL[usageLevel(featured)] }}
+                  <i class="feat__dot" />今天{{ usageText(featured) }}
                 </span>
                 <span class="feat__more">查看详情 →</span>
               </div>
@@ -463,7 +464,7 @@ function scrollToGrid() {
                 <p class="pick__summary">{{ p.summary }}</p>
                 <div class="pick__foot">
                   <span class="num pick__price">{{ p.ticket_price > 0 ? `¥${p.ticket_price}` : '免费' }}</span>
-                  <span class="muted cap">承载 {{ usageText(p) }}</span>
+                  <span class="muted cap">今天{{ usageText(p) }}</span>
                 </div>
               </div>
             </router-link>
@@ -476,7 +477,7 @@ function scrollToGrid() {
         <SectionHead
           eyebrow="资源清单"
           :title="`${BUSINESS_LABEL[activeType]} · ${list.length} 处`"
-          desc="按主题与区县继续收窄。列表顺序来自数据包编码顺序，不代表推荐排序。"
+          desc="按主题与区县继续收窄。列表按收录顺序排，不代表推荐名次。"
           size="md"
         />
 
@@ -491,7 +492,7 @@ function scrollToGrid() {
         <template v-else>
           <div class="result-count">
             <span class="num result-count__num">{{ list.length }}</span>
-            <span class="muted small">处{{ BUSINESS_LABEL[activeType] }} · 按承载力与距离统一调度</span>
+            <span class="muted small">处{{ BUSINESS_LABEL[activeType] }} · 人少的排在前面</span>
           </div>
           <div class="grid grid-3">
             <router-link
@@ -511,7 +512,7 @@ function scrollToGrid() {
                 />
                 <span class="pcard__kind">{{ BUSINESS_LABEL[p.business_type] }}</span>
                 <span class="pcard__load" :class="`pcard__load--${usageLevel(p)}`">
-                  {{ LOAD_LEVEL_LABEL[usageLevel(p)] }}
+                  {{ usageText(p) }}
                 </span>
               </div>
               <div class="pcard__body">
@@ -524,7 +525,7 @@ function scrollToGrid() {
 
                 <div class="load">
                   <div class="load__top">
-                    <span class="muted small">当前承载</span>
+                    <span class="muted small">今天人流</span>
                     <span class="num load__val" :class="`load__val--${usageLevel(p)}`">
                       {{ usageText(p) }}
                     </span>

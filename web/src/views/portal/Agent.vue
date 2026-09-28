@@ -97,12 +97,21 @@ const kbReady = computed(() => health.value?.ok === true)
 /** 示例问题由后端按**当前可用工具**生成，不在前端写死 */
 const samples = computed(() => health.value?.agent?.samples ?? [])
 
-/** 顶部状态徽标。三档对应三种真实运行形态，不显示"可能可以"这种模糊状态 */
+/**
+ * 顶部状态。
+ *
+ * ★ 面向游客：**只在出问题时才说话**，一切正常时整行不渲染。
+ *   原来这里是"AI 服务状态 / 高德地图已接入 / 本地知识库可用 / deepseek-chat"四个徽标 ——
+ *   那是运维和答辩口径。真实产品不会在页头告诉游客"我们的服务已就绪"、
+ *   用了哪家地图、跑的是哪个模型；游客只关心"能不能用"。
+ *   所以：正常 → 不显示；异常 → 给一句人话。
+ *   （模型名在管理端驾驶舱仍然可见，见 admin/Dashboard.vue 的 AI 解读署名。）
+ */
 const status = computed(() => {
-  if (healthError.value) return { lv: 'off', label: 'AI 服务不可达' }
+  if (healthError.value) return { lv: 'off', label: '助手暂时连不上，请稍后再试' }
   if (!health.value) return { lv: 'wait', label: '正在连接…' }
-  if (!kbReady.value) return { lv: 'off', label: '知识库未就绪' }
-  return { lv: 'ok', label: '已就绪' }
+  if (!kbReady.value) return { lv: 'off', label: '本地资料暂时不可用，请稍后再试' }
+  return { lv: 'ok', label: '' }
 })
 
 // ------------------------------------------------------------------ 对话
@@ -529,25 +538,23 @@ async function copyAddress(card: AgentCard) {
     <header class="agent__head">
       <div class="container agent__head-in">
         <div class="agent__head-l">
-          <p class="eyebrow">M4 · 工具调度</p>
+          <p class="eyebrow">汉中本地推荐</p>
           <h1 class="agent__title">AI 旅游助手</h1>
           <p class="agent__lead">
-            问它「<b>汉中高铁站附近推荐酒店</b>」这类问题，它会先去高德地图查真实地点，
-            再组织成一段推荐。推荐来自高德，<b>本页只做推荐、不代订</b>。
+            问它「<b>汉中高铁站附近推荐酒店</b>」这类问题，它会去查真实地点再给出建议，
+            地址、距离、电话都能核对。看到合适的可以直接打电话或导航过去。
           </p>
         </div>
 
         <div class="agent__caps">
-          <span class="cap" :class="`cap--${status.lv}`">
+          <!--
+            ★ 只保留"出问题时"的一句话。原来这里还有三个徽标：
+              「高德地图已接入 / 未配置」「本地知识库可用 / 不可用」和模型名（deepseek-chat）。
+              那是运维与答辩要看的信息，不是游客要看的 —— 已全部移除。
+          -->
+          <span v-if="status.lv !== 'ok'" class="cap" :class="`cap--${status.lv}`">
             <i class="cap__dot" />{{ status.label }}
           </span>
-          <span class="cap" :class="amapReady ? 'cap--on' : 'cap--mute'">
-            高德地图{{ amapReady ? '已接入' : '未配置' }}
-          </span>
-          <span class="cap" :class="kbReady ? 'cap--on' : 'cap--mute'">
-            本地知识库{{ kbReady ? '可用' : '不可用' }}
-          </span>
-          <span v-if="health?.model" class="cap cap--mute">{{ health.model }}</span>
         </div>
       </div>
     </header>
@@ -603,19 +610,25 @@ async function copyAddress(card: AgentCard) {
       <!-- ============ 空态：引导 + 示例问题 ============ -->
       <section v-if="!inSession" class="intro">
         <div class="intro__how">
-          <h2 class="intro__h2">它和「知识问答」有什么不同</h2>
+          <!--
+            ★ 原标题是「它和「知识问答」有什么不同」—— 那是拿我们自己的两个页面做比较，
+              游客没逛过全站，不知道"知识问答"是什么。改成说它能帮你做什么。
+              四条里的"查本地知识库 / 查高德地图 / 不是模型想出来的 / 模型只负责…"
+              也全部改成游客语言。
+          -->
+          <h2 class="intro__h2">它能帮你做什么</h2>
           <ol class="intro__steps">
             <li>
-              <b>先判断该查哪儿</b>
-              <span>是问汉中的公开知识（查本地知识库），还是问"附近有什么"（查高德地图）</span>
+              <b>找到真实的地方</b>
+              <span>酒店、餐厅、景点都能查，名称、地址、距离、电话都可以核对，也能直接导航过去</span>
             </li>
             <li>
-              <b>再真的去查</b>
-              <span>酒店、餐厅、景点的名称、地址、距离、电话都来自高德，不是模型想出来的</span>
+              <b>替你比一比</b>
+              <span>同样问一句，它会告诉你哪家更近、哪个更适合，省得自己一个个搜</span>
             </li>
             <li>
-              <b>最后组织成人话</b>
-              <span>模型只负责把查到的结果说清楚，并指出哪家更近、更适合</span>
+              <b>答得清楚</b>
+              <span>把查到的结果整理成一段能直接看懂的推荐，不用在几个页面之间来回翻</span>
             </li>
             <li>
               <b>记住你住哪儿</b>
@@ -700,7 +713,7 @@ async function copyAddress(card: AgentCard) {
             <div v-if="t.itinerary" class="itin">
               <div class="cards__head">
                 <span class="cards__t">{{ t.itinerary.title }}</span>
-                <span class="cards__src">方案由本地数据包排出，非模型生成</span>
+                <span class="cards__src">方案按你填的条件排出，非模型生成</span>
               </div>
 
               <!--
@@ -708,7 +721,7 @@ async function copyAddress(card: AgentCard) {
                 "宁可少排一天，也不重复推荐同一个点"这条规则要能看见。
               -->
               <p v-if="t.itinerary.days.length < t.itinerary.requested_days" class="itin__short">
-                您要的是 {{ t.itinerary.requested_days }} 天，数据包里可排的游览点只够
+                您要的是 {{ t.itinerary.requested_days }} 天，目前可排的游览点只够
                 {{ t.itinerary.days.length }} 天。
               </p>
 
@@ -755,7 +768,7 @@ async function copyAddress(card: AgentCard) {
                 出行前可能已经变了。写出来就必须标注来源与时效性。
               -->
               <p class="cards__note">
-                以上名称、级别、建议时长、门票与开放时间来自本地数据包的静态整理值，
+                以上名称、级别、建议时长、门票与开放时间来自本站整理的静态信息，
                 <b>不是实时信息</b>，出行前请以景区公告为准。本行程只排游览点，
                 不含餐饮、住宿与交通方式；同一天的点按地理位置就近排列。
               </p>

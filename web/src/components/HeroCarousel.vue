@@ -10,6 +10,11 @@
  * 每一帧的图片同样可缺省：没上传时回落到 SceneArt 手写 SVG（scene 字段）。
  * 交互只做三件克制的事：自动切换、淡入淡出、极轻微的缓慢推近。
  * 不做粒子、不做发光、不做跑马灯。
+ *
+ * ★ 左下角三个数字**由父组件传进来**（`stats` prop），不再写死在模板里。
+ *   原来这里硬编码了 42 / 14 / 16，和首页下方 `.stats` 那块读同一份数据的两套值 ——
+ *   数据包一变就会不一致，而首页同时显示这两处，一眼就能看出对不上。
+ *   没传（或还没加载完）时整行不渲染，**不会闪出"0 处"**。
  */
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import PoiImage from './PoiImage.vue'
@@ -17,6 +22,14 @@ import { getBanners } from '@/api/media'
 import type { SiteBanner } from '@/types'
 
 type Variant = 'qinling' | 'terrace' | 'rapeseed' | 'ancient' | 'river' | 'hanjiang' | 'hantai'
+
+withDefaults(
+  defineProps<{
+    /** 左下角的三个概览数字。空数组 = 还没加载好，整行不渲染 */
+    stats?: { value: number; unit: string; label: string }[]
+  }>(),
+  { stats: () => [] }
+)
 
 interface Slide {
   /** 列表渲染的 key。用 id 而不是 variant —— 两帧可能选同一个兜底画面，会撞 key */
@@ -32,15 +45,24 @@ interface Slide {
   cta: string
 }
 
+/**
+ * 内置兜底 4 帧。
+ *
+ * ★ 文案标准：**游客视角**。写"你能看到什么、能带走什么"，
+ *   不写"我们做了什么、系统怎么实现"。
+ *   原来这几帧里有"AI 参与的规划、分流与运营""把一次到访延展成一条持续消费链"
+ *   "让文化资源可阅读、可推荐、可被 AI 准确引用" —— 那是对评委说的话，
+ *   游客站在首页第一屏看到这些，会觉得走错了地方。
+ */
 const FALLBACK_SLIDES: Slide[] = [
   {
     key: 'fallback-qinling',
     variant: 'qinling',
-    eyebrow: '智慧文旅 · 乡村振兴',
+    eyebrow: '汉中文旅',
     title: '汉游智脑',
-    sub: '发现汉中，也发现乡村的新可能',
+    sub: '看得见山水，也带得走味道',
     desc:
-      '当景区高位运行，让客流顺着山谷流向乡村。AI 参与的规划、分流与运营，把一次到访延展成一条持续消费链。',
+      '秦岭的云海、汉江的古镇、村里的茶园与作坊。帮你把想看的、想吃的、想带走的，排成一条走得下来的动线。',
     to: '/explore',
     cta: '探索汉中',
   },
@@ -51,7 +73,7 @@ const FALLBACK_SLIDES: Slide[] = [
     title: '一江汉水，两岸春秋',
     sub: '从石门栈道到汉家发祥地',
     desc:
-      '汉中是汉文化的发祥地。我们把散落的景区、街巷、村镇连成可规划的动线，让每一次停留都落在有故事的地方。',
+      '汉中是汉文化的发祥地。石门栈道、古汉台、拜将坛都在一条不长的动线上，一天就能走完半部汉史。',
     to: '/assistant',
     cta: '问问智脑',
   },
@@ -62,7 +84,7 @@ const FALLBACK_SLIDES: Slide[] = [
     title: '把春天种在田里',
     sub: '花期之外，乡村仍然值得来',
     desc:
-      '油菜花、茶园、梯田不只是风景，也是可预约的乡村体验。游客走进来，收益留在村里。',
+      '油菜花、茶园、橘园、腊味作坊，都能走进去待上半天。跟着农户采一次茶、熏一挂肉，比拍照记得更久。',
     to: '/explore',
     cta: '乡村体验',
   },
@@ -73,7 +95,7 @@ const FALLBACK_SLIDES: Slide[] = [
     title: '檐下百年，一眼千载',
     sub: '在古建与花树之间读懂汉中',
     desc:
-      '以东方人文为底色的视觉与内容体系，让文化资源可阅读、可推荐、可被 AI 准确引用。',
+      '汉中市博物馆里藏着石门十三品，也藏着这座城两千年的来路。慢慢看，比匆匆打卡值得。',
     to: '/assistant',
     cta: '了解文脉',
   },
@@ -183,24 +205,17 @@ onUnmounted(stop)
 
         <div class="hero__cta">
           <router-link :to="current.to" class="btn btn-gold btn-lg">探索汉中</router-link>
-          <router-link to="/itinerary" class="btn btn-line btn-lg">AI 智能行程规划</router-link>
+          <router-link to="/itinerary" class="btn btn-line btn-lg">帮我规划行程</router-link>
         </div>
 
-        <div class="hero__stats">
-          <div class="hero__stat">
-            <span class="num hero__stat-num">42</span>
-            <span class="hero__stat-label">文旅资源点</span>
-          </div>
-          <span class="hero__stat-sep" />
-          <div class="hero__stat">
-            <span class="num hero__stat-num">14</span>
-            <span class="hero__stat-label">乡村体验项目</span>
-          </div>
-          <span class="hero__stat-sep" />
-          <div class="hero__stat">
-            <span class="num hero__stat-num">16</span>
-            <span class="hero__stat-label">乡村特色产品</span>
-          </div>
+        <div v-if="stats.length" class="hero__stats">
+          <template v-for="(s, i) in stats" :key="s.label">
+            <span v-if="i > 0" class="hero__stat-sep" />
+            <div class="hero__stat">
+              <span class="num hero__stat-num">{{ s.value }}</span>
+              <span class="hero__stat-label">{{ s.label }}</span>
+            </div>
+          </template>
         </div>
       </div>
     </div>

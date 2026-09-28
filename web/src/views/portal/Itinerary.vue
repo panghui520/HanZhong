@@ -11,13 +11,19 @@
  * 之所以把规则写得这么显式（而不是随机拼几条），是因为答辩要能讲清
  * "判定与生成是分开的"：
  *   - 承载力、距离、类型搭配 → 本文件的规则函数（确定性、可解释）
- *   - 措辞与推荐理由          → 未来交给 LLM（见页尾"怎么做到的"）
+ *   - 措辞与推荐理由          → 未来交给 LLM（见页尾"怎么排出来的"）
  * 页面里每一句 why 都是从数据算出来的，不是写死的文案。
+ *
+ * ★ 面向游客（2026-09-28 复查）：**上面这些是开发/答辩口径，只留在代码里。**
+ *   页面上不再出现"规则引擎 + AI 生成""承载力判定不能交给概率模型""M4 多智能体
+ *   规划尚未接入""承载 87%"这类字样 —— 换成了"按你填的条件现场算出""今天这里人
+ *   很多"。游客要的是"我能得到什么"，不是"我们用了什么技术"。
+ *   承载百分比统一走 `crowdWord`（人少 / 人较多 / 人很多）。
  */
 import { computed, ref } from 'vue'
 import { getCityPack } from '@/api/citypack'
 import { isEmpty, useAsync } from '@/composables/useAsync'
-import { usePoiStats } from '@/composables/usePoiStats'
+import { crowdLevelOf, crowdWord, usePoiStats } from '@/composables/usePoiStats'
 import { useReveal } from '@/composables/useReveal'
 import SceneArt from '@/components/SceneArt.vue'
 import PoiImage from '@/components/PoiImage.vue'
@@ -91,13 +97,18 @@ function perDayHint(p: string) {
 /** 承载率 → 展示档位。danger 是刻意保留的：超载样本要看得见 */
 /** 承载档位。`unknown` 与 `ok` 必须分开：把"读不到"归成"舒适"是个错误的结论 */
 function loadLv(u: number | undefined) {
-  if (u == null) return 'unknown'
-  return u >= 1 ? 'danger' : u >= 0.8 ? 'warn' : 'ok'
+  return crowdLevelOf(u)
 }
 
-/** 承载文案。取不到时给 "—"，**不要显示成 0%**（那是"很空"，是另一个结论） */
+/**
+ * 承载文案。
+ *
+ * ★ 2026-09-28 面向游客：不再输出"23%"（当日占用率），改用定性词
+ *   "人少 / 人较多 / 人很多"。阈值只有一份，在 `usePoiStats` 里。
+ *   取不到时给 "—"，**不要显示成"人少"**（那是"很空"，是另一个结论）。
+ */
 function usageText(u: number | undefined) {
-  return u == null ? '—' : `${Math.round(u * 100)}%`
+  return crowdWord(u)
 }
 
 /* ============================================================
@@ -259,31 +270,33 @@ const plan = computed<{ day: number; stops: Stop[] }[]>(() => {
   return out
 })
 
-/** 推荐理由：从数据算，不是写死的句式 —— 每种情况都对应一个真实判定 */
 /**
  * 这一站为什么排在这儿。
  *
+ * ★ 2026-09-28 面向游客：承载那一句原来写"当前承载 87% 已超载"，
+ *   现在是"今天这里人很多" —— 游客要的是结论，不是占用率。
+ *
  * 承载那一句在**取不到承载时不写**：这句是"为什么排它在这里"的理由，
- * 编一句"余量充足"比不说更糟 —— 用户会照着一个没有依据的结论安排行程。
+ * 编一句"人少"比不说更糟 —— 用户会照着一个没有依据的结论安排行程。
  * 但也不能整段空着（后半段拼出来会是个孤零零的句号），所以给一句可执行的话。
  */
 function reasonFor(p: Poi, usage: number | undefined, isRural: boolean, idx: number): string {
   const parts: string[] = []
   if (usage == null) {
-    parts.push('该点当日承载暂未获取，建议出行前再确认')
+    parts.push('今天这处的人流暂时读不到，出发前再确认一下')
   } else if (usage >= 1) {
-    parts.push(`当前承载 ${Math.round(usage * 100)}% 已超载，安排在此可避开高峰`)
+    parts.push('今天这里人很多，排在这一天正好避开高峰')
   } else if (usage >= 0.8) {
-    parts.push(`承载 ${Math.round(usage * 100)}% 偏高，建议错开午后时段`)
+    parts.push('今天这里人较多，建议错开午后时段')
   } else {
-    parts.push(`承载 ${Math.round(usage * 100)}%，余量充足，无需排队`)
+    parts.push('今天这里人少，不用排队')
   }
 
-  if (isRural) parts.push('且距离上一站路程相邻，可作为分流的承接点')
+  if (isRural) parts.push('离上一站不远，顺路就能去')
   else if (idx === 0) parts.push('作为当日首站，上午时段体验最佳')
 
   const hit = hitTags(p)
-  if (hit.length) parts.push(`与你选择的「${hit.join(' / ')}」偏好相符`)
+  if (hit.length) parts.push(`符合你选的「${hit.join(' / ')}」`)
 
   return parts.join('，') + '。'
 }
@@ -343,11 +356,11 @@ useReveal(
       <SceneArt variant="terrace" ratio="auto" class="banner__art" />
       <div class="banner__veil" />
       <div class="container banner__inner">
-        <span class="eyebrow eyebrow--light">AI 智能行程规划</span>
-        <h1 class="display banner__title">让 AI 把行程排顺<br />也把客流排匀</h1>
+        <span class="eyebrow eyebrow--light">智能行程规划</span>
+        <h1 class="display banner__title">让每一段汉中旅程<br />都恰到好处</h1>
         <p class="banner__desc">
-          规划不只考虑"去哪里"，还要考虑"哪里装得下"。系统在生成动线时同步读取各资源点的承载力余量，
-          把高位景区的一部分客流，顺势引导到承载充足、路程相邻的乡村体验点。
+          告诉我出行天数、同行人数和偏好，我帮你把景点、美食、住宿与乡村体验排成一条能照着走的动线 ——
+          顺带看一眼各处今天的人流，把人多的往后放、人少的往前排，不用把时间花在排队上。
         </p>
       </div>
     </header>
@@ -432,18 +445,18 @@ useReveal(
         <!-- 右：AI 判定过程 -->
         <section class="analysis">
           <div class="analysis__head">
-            <span class="ai-badge"><i class="ai-badge__dot" />规则引擎 + AI 生成</span>
-            <h2 class="analysis__title">本次规划的判定摘要</h2>
+            <span class="ai-badge"><i class="ai-badge__dot" />按你填的条件现场算出</span>
+            <h2 class="analysis__title">这份行程的要点</h2>
           </div>
 
-          <p v-if="loading" class="analysis__lead muted">正在读取资源与承载力数据…</p>
+          <p v-if="loading" class="analysis__lead muted">正在读取资源与今天的人流…</p>
           <p v-else-if="error" class="analysis__lead">
             <span style="color: var(--danger)">{{ error }}</span>
             <button class="btn btn-ghost btn-sm" style="margin-left: 12px" @click="reload">重试</button>
           </p>
           <p v-else class="analysis__lead">
-            在 {{ data?.pois.length ?? 0 }} 处资源中，按「兴趣匹配度 72% + 承载余量 28%」排序，
-            取前 {{ totalSpots }} 个点编排为 {{ days }} 天动线，
+            在 {{ data?.pois.length ?? 0 }} 处资源里，先按你选中的兴趣挑，再看今天各处人多不多，
+            取前 {{ totalSpots }} 个点排成 {{ days }} 天动线，
             <b>其中 {{ ruralShare }}% 安排在乡村体验点</b>。
           </p>
 
@@ -453,11 +466,11 @@ useReveal(
               <dd class="num">{{ allStops.length }}</dd>
             </div>
             <div class="metric">
-              <dt>乡村占比</dt>
+              <dt>乡村体验占比</dt>
               <dd class="num">{{ ruralShare }}<i>%</i></dd>
             </div>
             <div class="metric">
-              <dt>硬支出估算</dt>
+              <dt>门票与体验</dt>
               <dd class="num">¥{{ ticketSum + expSum }}</dd>
             </div>
             <div class="metric">
@@ -469,8 +482,8 @@ useReveal(
           </dl>
 
           <p class="analysis__note">
-            硬支出 = 门票 + 乡村体验 + 挂靠农产品，<b>不含餐饮与住宿</b> ——
-            这两项的公开数据不足，给出貌似精确的总价反而是误导。
+            这笔钱 = 门票 + 乡村体验 + 想带走的特产，<b>不含餐饮与住宿</b> ——
+            这两项没有可靠的公开价格，给出一个貌似精确的总价反而是误导。
           </p>
         </section>
       </div>
@@ -481,7 +494,7 @@ useReveal(
       <SectionHead
         eyebrow="行程草案"
         :title="`${days} 天 · ${PACE_LABEL[pace]} · ${BUDGET_LABEL[budget]}预算`"
-        desc="每一站的理由都由规则算出：承载力读当日数据，兴趣匹配读你上面的选择。"
+        desc="每一站为什么排在这儿都写在下面：按你的兴趣，也按今天各处人多不多。"
         size="lg"
         more-text="看真实资源"
         more-to="/explore"
@@ -493,7 +506,8 @@ useReveal(
 
       <div v-else-if="isEmpty(plan)" class="empty">
         <div class="empty__title">暂时生不出行程</div>
-        <div class="empty__desc">数据包里没有可用资源，请检查后端服务</div>
+        <!-- ★ 面向游客：原来写"数据包里没有可用资源，请检查后端服务"——开发自检话术。 -->
+        <div class="empty__desc">换个天数或兴趣再试一次，或者先去「探索汉中」看看有哪些地方。</div>
       </div>
 
       <template v-else>
@@ -538,7 +552,7 @@ useReveal(
 
                     <div class="stopcard__facts">
                       <span class="fact">
-                        <i class="fact__k">承载</i>
+                        <i class="fact__k">今天人流</i>
                         <b class="num" :class="`fact--${loadLv(s.usage)}`">{{ usageText(s.usage) }}</b>
                       </span>
                       <span class="fact">
@@ -593,39 +607,39 @@ useReveal(
       </template>
     </div>
 
-    <!-- ============ 4. 方法说明 ============ -->
+    <!-- ============ 4. 方法说明（游客口径：讲"这份行程怎么来的"，不讲"用了什么技术"） ============ -->
     <div class="container section">
       <section class="method">
         <SectionHead
-          eyebrow="怎么做到的"
-          title="判定用规则，生成与解释用 AI"
-          desc="承载力判定不能交给概率模型；文案与解释才交给大模型。两者各守边界，互不越界。"
+          eyebrow="怎么排出来的"
+          title="先按你的条件筛，再按今天的人流排"
+          desc="每一步都按确定的条件算，都能说清为什么 —— 不是随机拼几条，也不是套模板。"
           size="lg"
         />
         <div class="grid grid-3 method__grid">
           <div class="mcard reveal">
             <span class="mcard__no num">01</span>
-            <h3 class="h3">候选集召回</h3>
-            <p class="body">按行政区、类型、距离与开放状态筛出候选池，保证动线可达。</p>
-            <span class="mcard__in">输入：资源网络 + 你的兴趣偏好</span>
+            <h3 class="h3">挑出能去的</h3>
+            <p class="body">先按天数、预算、兴趣和路程筛一遍，保证一天之内走得完、接得上。</p>
+            <span class="mcard__in">用到的：你填的条件 + 各处之间的距离</span>
           </div>
           <div class="mcard reveal">
             <span class="mcard__no num">02</span>
-            <h3 class="h3">承载力过滤</h3>
-            <p class="body">读取各点当日承载余量，余量低于阈值的点降权，余量充足的点前置。</p>
-            <span class="mcard__in">输入：各点 capacity 与当日占用</span>
+            <h3 class="h3">避开人多的</h3>
+            <p class="body">再看各处今天人多不多：人多的往后放、人少的往前排，把排队的时间省下来。</p>
+            <span class="mcard__in">用到的：今天各处的实时人流</span>
           </div>
           <div class="mcard reveal">
             <span class="mcard__no num">03</span>
-            <h3 class="h3">AI 生成与解释</h3>
-            <p class="body">大模型只负责把动线写成可读的行程说明与推荐理由，不改判定结果。</p>
-            <span class="mcard__in">输出：行程文本 · 不参与判定</span>
+            <h3 class="h3">写成能走的</h3>
+            <p class="body">最后把动线写成一份照着走就行的说明，每一站为什么排在这儿都写清楚。</p>
+            <span class="mcard__in">输出：一份可执行的行程</span>
           </div>
         </div>
 
         <p class="method__foot">
-          本页当前由前端规则演示（<b>M4 多智能体规划尚未接入</b>）。上面每一条推荐理由都由规则当场算出，
-          不是预置文案 —— 接入后端后，规则判定下沉到 M4，本页只负责渲染返回结果。
+          以上每一步都是按你填的条件当场算出来的，不是预置的模板行程 ——
+          换一个天数或换一项兴趣，排出来的动线就会跟着变。
         </p>
       </section>
     </div>
@@ -807,7 +821,7 @@ useReveal(
   font-weight: 500;
 }
 
-/* 右：判定摘要 */
+/* 右：行程要点 */
 .analysis {
   padding: var(--sp-6) var(--sp-7);
   background: var(--paper-3);

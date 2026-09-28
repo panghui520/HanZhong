@@ -37,6 +37,13 @@ import {
  * 空态时是一个有引导的欢迎区（能做的事、覆盖什么、推荐问题、可推的内容），
  * 一旦开始提问就收成流式对话。这样它看起来是一个"知识服务入口"，
  * 而不是一个打开的聊天窗口。
+ *
+ * ★ 面向游客（2026-09-28 复查）：这一页的文案只说"你能问到什么、答案从哪来"，
+ *   不说"我们用了什么技术"。已删掉：页面顶部的服务就绪徽标（正常态不渲染）、
+ *   侧栏「知识库状态」仪表盘（切片/文档、检索词表、预生成条数、向量化模型名）、
+ *   会话栏的"检索 N 切片 / M 文档 · 在线生成"、方法说明里的"词法+向量混合召回、
+ *   当前词表 N 词"。每条回答**自身**的来源徽标与「检索 N 条」依据提示保留 ——
+ *   那是透明度，不是就绪状态。
  */
 
 // ---------------------------------------------------------------- 知识库状态
@@ -45,24 +52,38 @@ const health = ref<AiHealth | null>(null)
 const healthError = ref('')
 const suggestions = ref<string[]>([])
 
-const modeText = computed(() => {
-  const h = health.value
-  if (!h) return ''
-  if (h.demo_mode) return '离线演示（预生成答案）'
-  return h.llm_configured ? `大模型生成 · ${h.model ?? ''}` : '原文摘录（未配置大模型）'
-})
+/**
+ * ★ 面向游客（2026-09-28）：**这里原本有一个 `modeText`**，输出
+ *   "大模型生成 · deepseek-chat" / "离线演示（预生成答案）" / "原文摘录"，
+ *   用在会话栏与侧栏"知识库状态"里。
+ *
+ *   它和侧栏那整块仪表盘（切片/文档、检索词表、预生成条数、向量化模型名）
+ *   一起删掉了 —— 那是运营与工程口径，游客看了只会困惑，
+ *   真实产品不会在页头写"我们的服务已就绪、用的是哪个模型"。
+ *   模型名与运行模式在管理端驾驶舱仍然可见（admin/Dashboard.vue 的 AI 解读署名）。
+ *
+ *   每条回答**自身**的来源徽标（`.tag`：大模型生成 / 原文摘录 / 通用问答）
+ *   保留 —— 那是"这条答案从哪来"的透明度，属于游客收益，不是就绪状态。
+ */
 
-/** AI 状态的档位：决定徽标的颜色与文案。三档对应三种真实运行形态 */
+/**
+ * 知识问答的运行状态。
+ *
+ * ★ 面向游客：**只在出问题时才说话**。原来这里是"在线生成 / 离线演示模式 /
+ *   语料已变化 / 知识库不可达"四档，hint 里还带 `大模型 deepseek-chat · 词表 12,345 词`。
+ *   "语料已变化""词表 N 词"是运营与工程口径，游客看了只会困惑。
+ *   正常时整枚徽标不渲染 —— 真实产品不会在页头告诉用户"我们的服务已就绪"。
+ */
 const aiStatus = computed(() => {
-  if (healthError.value) return { lv: 'off', label: '知识库不可达', hint: healthError.value }
-  const h = health.value
-  if (!h) return { lv: 'wait', label: '正在连接知识库', hint: '读取切片与词表信息…' }
-  if (h.stale) return { lv: 'warn', label: '语料已变化', hint: h.stale_hint || '建议重建知识库' }
-  if (h.demo_mode) return { lv: 'demo', label: '离线演示模式', hint: '按预生成答案回放，无需联网' }
-  if (h.llm_configured) return { lv: 'ok', label: '在线生成', hint: `大模型 ${h.model ?? ''} · 词表 ${h.lexical.terms.toLocaleString()} 词` }
-  return { lv: 'extract', label: '原文摘录', hint: '未配置大模型，直接摘录知识库原文' }
+  if (healthError.value) return { lv: 'off', label: '暂时连不上，请稍后再试' }
+  if (!health.value) return { lv: 'wait', label: '正在连接…' }
+  return { lv: 'ok', label: '' }
 })
 
+/**
+ * 覆盖范围。**标签要游客看得懂**：
+ * 原来写的是"统一资源"（行业口径），改成"汉中好去处"。
+ */
 const scopeText = computed(() => {
   // 用 by_type_docs（文档数）而不是 by_type（切片数）：
   // 这里的单位是"篇/个/项/款"，是**条数**口径。长文档会切成多片，
@@ -70,10 +91,10 @@ const scopeText = computed(() => {
   // 用切片数会显示成"79 篇城市知识"。
   const by = health.value?.by_type_docs ?? {}
   const parts = [
-    ['poi', '个资源点'],
+    ['poi', '个汉中好去处'],
     ['experience', '项乡村体验'],
-    ['product', '款乡村产品'],
-    ['city_doc', '篇城市知识'],
+    ['product', '款乡村好物'],
+    ['city_doc', '篇汉中知识'],
   ] as const
   return parts
     .map(([key, unit]) => ({ value: by[key] ?? 0, unit }))
@@ -84,10 +105,10 @@ const scopeText = computed(() => {
 const scopeAll = computed(() => {
   const by = health.value?.by_type_docs ?? {}
   return [
-    { key: 'city_doc', label: '城市知识', unit: '篇', value: by.city_doc ?? 0 },
-    { key: 'poi', label: '统一资源', unit: '处', value: by.poi ?? 0 },
+    { key: 'city_doc', label: '汉中知识', unit: '篇', value: by.city_doc ?? 0 },
+    { key: 'poi', label: '汉中好去处', unit: '处', value: by.poi ?? 0 },
     { key: 'experience', label: '乡村体验', unit: '项', value: by.experience ?? 0 },
-    { key: 'product', label: '乡村产品', unit: '款', value: by.product ?? 0 },
+    { key: 'product', label: '乡村好物', unit: '款', value: by.product ?? 0 },
   ]
 })
 
@@ -263,17 +284,17 @@ useReveal(root, packLoading)
       <div class="hero__veil" />
 
       <div class="container hero__inner">
-        <!-- AI 状态徽标：放在最显眼处，不用翻侧栏就知道现在跑在哪种模式 -->
-        <span class="aistat" :class="`aistat--${aiStatus.lv}`">
+        <!-- 状态徽标：**正常时不渲染**（真实产品不会在页头写"我们的服务已就绪"），
+             只有连不上或还在连接时才出现，见 aiStatus。 -->
+        <span v-if="aiStatus.label" class="aistat" :class="`aistat--${aiStatus.lv}`">
           <i class="aistat__dot" />
           {{ aiStatus.label }}
         </span>
 
-        <h1 class="display hero__title">先查过资料，<br />再开口回答</h1>
+        <h1 class="display hero__title">汉中的事，<br />问它就有答案</h1>
         <p class="hero__desc">
-          涉及汉中的问题先在城市知识库中检索，回答依据检索到的公开资料组织，并附上出处；
-          与汉中无关的问题直接回答。知识库没有写过的本地事实，系统会直接说明，
-          不会替它补一个听起来合理的答案。
+          从地理气候到历史物产，从某一处景点到某一款特产，涉及汉中的回答都会附上出处，
+          来源可以点开自己核对。查不到的地方它直说查不到，不会编一个听起来合理的答案。
         </p>
 
         <!-- 覆盖范围：把"这个知识库里有什么"讲清楚，而不是只给一个聊天框 -->
@@ -303,7 +324,7 @@ useReveal(root, packLoading)
             提问
           </button>
         </div>
-        <p class="hero__hint">Enter 发送 · Shift+Enter 换行 · 汉中问题先查知识库，本地事实查不到会直说</p>
+        <p class="hero__hint">Enter 发送 · Shift+Enter 换行 · 涉及汉中的回答都附出处，查不到的会直说</p>
       </div>
     </header>
 
@@ -311,11 +332,10 @@ useReveal(root, packLoading)
     <section v-if="!inSession && suggestions.length" class="container section">
       <div class="quick reveal">
         <div class="quick__head">
-          <span class="eyebrow">快捷问题</span>
-          <h2 class="h2 quick__title">这些问题命中率最高</h2>
+          <span class="eyebrow">常见问题</span>
+          <h2 class="h2 quick__title">游客最常问的几件事</h2>
           <p class="quick__desc">
-            推荐问题来自知识库实际覆盖的内容，不是预设的演示脚本 ——
-            点一下就能看到完整的检索与出典过程。
+            朱鹮、油菜花、仙毫、老街 —— 点一下就能看到答案，以及答案是从哪儿来的。
           </p>
         </div>
         <div class="quick__chips">
@@ -335,29 +355,29 @@ useReveal(root, packLoading)
       </div>
     </section>
 
-    <!-- ============ 3. 可视化知识库内容（真实数据，非写死） ============ -->
+    <!-- ============ 3. 可视化可问内容（真实数据，非写死） ============ -->
     <section v-if="!inSession" class="container section-0">
       <div class="know reveal">
         <div class="know__copy">
-          <span class="eyebrow">知识库里有这些</span>
+          <span class="eyebrow">可以问到多细</span>
           <h2 class="h2 know__title">不只答常识，也答得上具体的一处、一项、一款</h2>
           <p class="know__desc">
-            除城市概况等公开资料外，数据包里的每一处资源、每一项乡村体验、
-            每一款挂靠农产品都已切片入库。所以可以问到很细的程度 ——
-            某条体验适合什么季节、某款特产的产区在哪里，都有据可查。
+            除了城市概况，汉中每一处景点、每一项乡村体验、每一款特产的信息都在里面。
+            所以可以问到很细的程度 —— 某条体验适合什么季节、某款特产的产区在哪里，
+            都有据可查。
           </p>
           <ul class="know__list">
             <li>
-              <span class="know__k">原文可核对</span>
-              <span class="know__v">涉及汉中的回答附来源，可点开对照原文</span>
+              <span class="know__k">答案有出处</span>
+              <span class="know__v">涉及汉中的回答都附来源，可以点开对照原文</span>
             </li>
             <li>
               <span class="know__k">答不上就直说</span>
-              <span class="know__v">知识库没有依据的本地事实，明确说明，不编造</span>
+              <span class="know__v">没有依据的本地信息会明确说明，不会编一个给你</span>
             </li>
             <li>
-              <span class="know__k">离线可演示</span>
-              <span class="know__v">断网时按预生成答案回放或摘录原文，链路不中断</span>
+              <span class="know__k">可以接着问</span>
+              <span class="know__v">问完朱鹮接着问去哪儿看，不用重新组织语言</span>
             </li>
           </ul>
         </div>
@@ -384,7 +404,7 @@ useReveal(root, packLoading)
 
           <article v-if="showcase.prod" class="kcard kcard--good">
             <div class="kcard__body">
-              <span class="kcard__kind kcard__kind--flat">挂靠农产品</span>
+              <span class="kcard__kind kcard__kind--flat">乡村好物</span>
               <h3 class="kcard__name">{{ showcase.prod.name }}</h3>
               <p class="kcard__meta">
                 {{ showcase.prod.category }} · {{ showcase.prod.spec }} ·
@@ -396,7 +416,7 @@ useReveal(root, packLoading)
                 <span class="num kcard__price">¥{{ showcase.prod.price }}</span>
               </div>
               <p class="kcard__chain">
-                ↑ 与上面那项体验同源（<code>{{ showcase.prod.experience_name }}</code>）
+                ↑ 和上面那项体验在同一个地方（{{ showcase.prod.experience_name }}）
               </p>
             </div>
           </article>
@@ -408,12 +428,10 @@ useReveal(root, packLoading)
     <div class="container session" :class="{ 'session--on': inSession }">
       <div class="session__bar">
         <div class="row session__left">
-          <span class="aistat aistat--sm" :class="`aistat--${aiStatus.lv}`">
+          <!-- 与 hero 同一枚徽标：正常时不渲染，只在连不上/连接中时出现 -->
+          <span v-if="aiStatus.label" class="aistat aistat--sm" :class="`aistat--${aiStatus.lv}`">
             <i class="aistat__dot" />
             {{ aiStatus.label }}
-          </span>
-          <span v-if="health" class="cap muted">
-            检索 {{ health.chunks }} 切片 / {{ health.docs }} 文档 · {{ modeText }}
           </span>
         </div>
         <button v-if="inSession" class="btn btn-ghost btn-sm" type="button" @click="reset">
@@ -536,7 +554,7 @@ useReveal(root, packLoading)
             />
             <div class="composer__actions">
               <span class="cap muted">
-                Enter 发送 · Shift+Enter 换行 · 汉中问题先查知识库，本地事实查不到会直说
+                Enter 发送 · Shift+Enter 换行 · 涉及汉中的回答都附出处，查不到的会直说
               </span>
               <div class="row">
                 <button v-if="streaming" class="btn btn-ghost btn-sm" type="button" @click="stop">
@@ -555,40 +573,11 @@ useReveal(root, packLoading)
           </div>
         </section>
 
-        <!-- 侧栏：知识库状态 -->
+        <!-- 侧栏：覆盖范围 + 推荐问题。
+             ★ 2026-09-28 删掉了原来的「知识库状态」整块（切片/文档、检索词表、
+             预生成答案条数、向量化模型名、语料已变化告警）—— 那是工程仪表盘，
+             游客端不需要；连不上时的提示由 .aistat 徽标承担。 -->
         <aside class="rail">
-          <div class="rail__block">
-            <div class="rail__title">知识库状态</div>
-
-            <p v-if="healthError" class="rail__alert small">{{ healthError }}</p>
-            <template v-else-if="health">
-              <div class="stat">
-                <span class="stat__k">切片 / 文档</span>
-                <span class="stat__v num">{{ health.chunks }} / {{ health.docs }}</span>
-              </div>
-              <div class="stat">
-                <span class="stat__k">检索词表</span>
-                <span class="stat__v num">{{ health.lexical.terms.toLocaleString() }}</span>
-              </div>
-              <div class="stat">
-                <span class="stat__k">回答模式</span>
-                <span class="stat__v stat__v--text">{{ modeText }}</span>
-              </div>
-              <div class="stat">
-                <span class="stat__k">预生成答案</span>
-                <span class="stat__v num">{{ health.cache_entries }} 条</span>
-              </div>
-              <div class="stat stat--stack">
-                <span class="stat__k">向量化</span>
-                <code class="stat__code">{{ health.embedder }}</code>
-              </div>
-              <p v-if="health.stale" class="rail__alert small">
-                {{ health.stale_hint || '语料已变化，建议重建知识库' }}
-              </p>
-            </template>
-            <p v-else class="small muted">正在读取…</p>
-          </div>
-
           <div class="rail__block">
             <div class="rail__title">覆盖范围</div>
             <ul class="scope-list">
@@ -598,8 +587,8 @@ useReveal(root, packLoading)
               </li>
             </ul>
             <p class="cap muted scope-list__note">
-              城市知识来自汉中市人民政府《汉中概况》等公开资料，资源点信息来自数据包。
-              涉及汉中的回答，来源都可点开核对；与汉中无关的问题不查知识库，也就不署名来源。
+              这些内容来自政府公开资料与本站整理的资料。
+              涉及汉中的回答，来源都可点开核对；与汉中无关的问题不查资料，也就不署名来源。
             </p>
           </div>
 
@@ -617,24 +606,22 @@ useReveal(root, packLoading)
       </div>
     </div>
 
-    <!-- ============ 5. 免责与方法说明 ============ -->
+    <!-- ============ 5. 免责与边界说明 ============ -->
     <section class="container section">
       <div class="foot reveal">
         <div class="foot__col">
           <span class="eyebrow">为什么会答得上</span>
           <p>
-            知识库由公开资料与项目数据包共同构建：城市常识来自政府公开页面，
-            具体资源信息来自 <code>citypack/</code>。两类都带出处，检索时按
-            <b>词法 + 向量混合召回</b>（当前词表
-            {{ health?.lexical.terms.toLocaleString() ?? '—' }} 词）取相关片段，
-            再由模型或摘录器组织成回答。
+            答案里的地名、气候、物产，都来自政府公开资料与本站整理的资料 ——
+            两类都带着出处。它会先在资料里找到相关的那几段，再组织成一段话，
+            所以每个说法都能顺着来源点回去看。
           </p>
         </div>
         <div class="foot__col">
           <span class="eyebrow">它不做什么</span>
           <p>
             不做闲聊，不给主观推荐排序，不预测天气与票价 ——
-            这些都不是知识库里写着的。它只回答可核对的事实，
+            这些资料里都没写。它只回答能核对的事实，
             并把"不确定"如实说出来。
           </p>
         </div>
@@ -690,7 +677,10 @@ useReveal(root, packLoading)
   color: rgba(233, 240, 236, 0.85);
 }
 
-/* AI 状态徽标 —— 三档颜色对应三种真实运行形态 */
+/* 状态徽标 —— ★ 2026-09-28 起只剩两种形态：连不上（off）/ 正在连接（wait）。
+   原来还有 ok / demo / warn / extract 四档（在线生成、离线演示、语料已变化、
+   原文摘录），随"知识库状态"仪表盘一起删掉了 —— 正常时不显示任何徽标。
+   各条回答**自身**的来源徽标是另一套（见 .tag / .tag-gold），不受影响。 */
 .aistat {
   display: inline-flex;
   align-items: center;
@@ -712,26 +702,6 @@ useReveal(root, packLoading)
   border-radius: 50%;
   background: currentColor;
   flex: none;
-}
-.aistat--ok {
-  color: #cdeadd;
-  background: rgba(42, 111, 91, 0.35);
-  border-color: rgba(113, 169, 150, 0.5);
-}
-.aistat--demo {
-  color: #f0e2c4;
-  background: rgba(192, 154, 78, 0.24);
-  border-color: rgba(226, 202, 145, 0.5);
-}
-.aistat--warn {
-  color: #f7e6c6;
-  background: rgba(168, 121, 29, 0.3);
-  border-color: rgba(226, 202, 145, 0.5);
-}
-.aistat--extract {
-  color: #cfe4f7;
-  background: rgba(46, 123, 196, 0.24);
-  border-color: rgba(147, 191, 230, 0.45);
 }
 .aistat--off {
   color: #f6dcd5;
@@ -1017,12 +987,8 @@ useReveal(root, packLoading)
   color: var(--gold-600);
   line-height: 1.6;
 }
-.kcard__chain code {
-  padding: 1px 5px;
-  font-size: 11px;
-  background: rgba(255, 255, 255, 0.7);
-  border-radius: var(--r-sm);
-}
+/* ★ 2026-09-28 删除 `.kcard__chain code`：那行原来是
+   "↑ 与上面那项体验同源（<code>体验名</code>）"，改成游客说法后不再有 code 标签。 */
 
 /* ============ 4. 对话区 ============ */
 .session {
@@ -1050,17 +1016,6 @@ useReveal(root, packLoading)
   color: var(--brand-700);
   background: var(--brand-50);
   border-color: var(--brand-100);
-}
-.session__bar .aistat--demo,
-.session__bar .aistat--warn {
-  color: var(--gold-600);
-  background: var(--gold-50);
-  border-color: var(--gold-300);
-}
-.session__bar .aistat--extract {
-  color: var(--tech-600);
-  background: var(--tech-50);
-  border-color: var(--tech-300);
 }
 .session__bar .aistat--off {
   color: var(--danger);
@@ -1369,49 +1324,9 @@ useReveal(root, packLoading)
   color: var(--ink-900);
   margin-bottom: var(--sp-4);
 }
-.rail__alert {
-  padding: var(--sp-3);
-  color: var(--warn);
-  background: var(--warn-50);
-  border-radius: var(--r-md);
-  line-height: 1.6;
-}
-
-.stat {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: var(--sp-3);
-  padding: var(--sp-3) 0;
-  border-bottom: 1px solid var(--line-soft);
-}
-.stat--stack {
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 6px;
-}
-.stat__k {
-  font-size: var(--fs-cap);
-  color: var(--warm-500);
-}
-.stat__v {
-  font-size: var(--fs-sm);
-  font-weight: 600;
-  color: var(--brand-700);
-}
-.stat__v--text {
-  font-weight: 500;
-  color: var(--ink-700);
-  text-align: right;
-}
-.stat__code {
-  font-size: 11px;
-  padding: 3px 7px;
-  color: var(--ink-600);
-  background: var(--paper-2);
-  border-radius: var(--r-sm);
-  word-break: break-all;
-}
+/* ★ 2026-09-28 删除 `.rail__alert` 与整组 `.stat*`（.stat / .stat--stack /
+   .stat__k / .stat__v / .stat__v--text / .stat__code）：
+   它们只服务于已删除的「知识库状态」仪表盘。 */
 
 .scope-list {
   display: grid;
@@ -1537,9 +1452,6 @@ useReveal(root, packLoading)
   }
   .scard__from {
     flex: 1 0 100%;
-  }
-  .stat__v--text {
-    text-align: left;
   }
 }
 </style>

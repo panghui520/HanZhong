@@ -324,7 +324,7 @@ async function logout() {
           <div class="footer__col">
             <div class="footer__title">数据来源</div>
             <span>汉中市文化和旅游局公开资料</span>
-            <span>客流 / 订单为规则仿真数据</span>
+            <span>客流与订单为演示用仿真数据</span>
           </div>
         </div>
       </div>
@@ -779,9 +779,78 @@ async function logout() {
 }
 
 @media (max-width: 720px) {
+  /* 顶栏在手机上改两行。
+   *
+   * 为什么不是"让链接区横向滚动"就够了：390px 视口实测整条 nav 宽 487px
+   * （多出 97px → 整页出现横向滚动条）。而 .nav__inner 自身还有 32px×2 的 gap、
+   * 右侧操作区自然宽 197px —— 把链接区压到 0 宽也仍然差 11px。所以**光滚动不够**，
+   * 必须换行。
+   *
+   * 也不选择"隐藏导航项"：这个仓库的一级导航有 7 项
+   * （首页 / 探索汉中 / 互动地图 / 行程规划 / 知识问答 / AI 助手 / 乡村好物），
+   * 手机上删掉它们等于删掉功能。换行则一项不少。
+   *
+   * 高度由 --nav-h 给出（base.css 的 720px 断点里已同步改成 92px）。
+   *
+   * ★ 但手机上**不能真的锁死 height**：窄机型（360px）一行放不下 7 项，链接要折成
+   *   两行，锁死就会溢出到 Hero 上。所以这里改成"内容驱动 + min-height 兜底"：
+   *   height: auto 让它自然长高，min-height: var(--nav-h) 保证不比设计值矮。
+   *   为什么敢这么做：移动端 --nav-h 的**唯一真实消费者就是 .nav 自己** ——
+   *   Assistant 的 .rail、PoiDetail 的 .dside、Checkout 的 .summary 在 720px 断点里
+   *   都已经被置为 position: static（逐个 grep 确认过），不再用 top: calc(--nav-h + …)。
+   *   而 Hero 用的是 --hero-h（固定 520px）、且 .nav 是 sticky 在流内的，
+   *   顶栏长高只会把下面的内容整体推下去，不会压住谁。 */
+  .nav {
+    height: auto;
+    min-height: var(--nav-h);
+  }
+  .nav__inner {
+    flex-wrap: wrap;
+    align-content: center;
+    row-gap: var(--sp-2);
+    column-gap: var(--sp-4);
+  }
+  /* 第一行：品牌在左、操作区在右（.nav__actions 的 margin-left:auto 已有） */
+  .brand,
+  .nav__actions {
+    flex: none;
+  }
+  .nav__actions {
+    gap: var(--sp-2);
+  }
+  /* 第二行：导航整行下沉。flex-basis 100% 是"独占一行"的关键 */
   .nav__links {
-    gap: var(--sp-4);
+    order: 3;
+    flex: 1 1 100%;
     margin-left: 0;
+    gap: var(--sp-1);
+    justify-content: space-between;
+    /* 兜底：7 项在极窄机型上仍可能差几像素，让它自己滑，不要撑破页面 */
+    min-width: 0;
+    overflow-x: auto;
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+  }
+  /*
+   * ★ 这两行是必须的，少了任意一行链接就会**文字换行**（"首页"竖成"首/页"）。
+   *   原因：`.nav__links` 变成 flex 行之后，`.nav__link` 默认 flex-shrink:1 会被压缩，
+   *   文字在窄盒子里就断行了 —— 宽度量着"刚好放得下"，看着却是两行乱码。
+   *   `flex: none` 让每个链接取自然宽，`white-space: nowrap` 禁止盒内断行。
+   *
+   * ★ 字号也必须降一档（--fs-sm 14px → --fs-xs 13px）。
+   *   7 项在 14px 下自然宽 352px + 6×4px gap = 376px，而视口可用只有 358px
+   *   （390 - 两侧 16px）→ 溢出 18px，最后一项"乡村好物"被裁。
+   *   降到 13px 后约 327 + 24 = 351px，留 7px 余量。
+   *   gap 取 --sp-1 而非 --sp-2：space-between 下 gap 是**最小**间距，
+   *   留小一点才有余量，字体渲染略宽时不会直接溢出。
+   */
+  .nav__link {
+    flex: none;
+    white-space: nowrap;
+    font-size: var(--fs-xs);
+  }
+  .nav__links::-webkit-scrollbar {
+    display: none;
   }
   .brand__sub {
     display: none;
@@ -789,6 +858,46 @@ async function logout() {
   .footer__cols {
     gap: var(--sp-6);
     flex-wrap: wrap;
+  }
+}
+
+/*
+ * ≤400px（360 这类窄屏安卓机）：一行真的放不下，必须同时收窄"横向"三个量。
+ *
+ * 量过的事实（360px 视口）：
+ *   - 7 个链接在 13px 下自然宽 327px + 6×4px gap = 351px，而可用只有 328px
+ *     （360 - 两侧 16px）→ 差 23px。硬撑一行的话最后一项"乡村好物"会被压进
+ *     overflow-x: auto 的滚动区 —— **滚动条是隐藏的，用户根本不知道右边还有一项**，
+ *     等于悄悄删掉一个入口。
+ *   - 更麻烦的是第一行：品牌约 126px + 操作区约 198px + .nav__inner 的 24px gap
+ *     = 348px > 328px，于是**操作区也被挤到第二行**，顶栏一度长到 164px
+ *     （实测），sticky 顶栏吃掉 1/5 屏。
+ *
+ * 所以这里三件事一起做：
+ *   ① 容器内边距 16 → 12px、行内间距 24 → 8px（给第一行腾出 20px）
+ *   ② 链接字号 13 → 12px（--fs-cap）、链接间距 4px
+ *   ③ 仍保留 flex-wrap 作为**最后兜底**：比 360 更窄的机器（如 320px）会自然折成
+ *      两行而不是溢出 —— 折行不会撑破页面，因为 .nav 在 720px 断点里已是 height: auto。
+ *      这就是"参数收紧 + 结构性兜底"两条腿走路，不用为每个机型写死断点。
+ */
+@media (max-width: 400px) {
+  .nav__inner {
+    padding-left: var(--sp-3);
+    padding-right: var(--sp-3);
+    column-gap: var(--sp-2);
+  }
+  .nav__links {
+    flex-wrap: wrap;
+    justify-content: space-between;
+    column-gap: var(--sp-1);
+    row-gap: var(--sp-1);
+    overflow-x: visible;
+  }
+  .nav__link {
+    font-size: var(--fs-cap);
+  }
+  .nav__actions {
+    gap: var(--sp-1);
   }
 }
 </style>

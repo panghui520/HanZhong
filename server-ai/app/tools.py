@@ -569,7 +569,12 @@ def _knowledge_search(args: dict[str, Any], *, store: KbStore, top_k: int) -> To
     if not query:
         return ToolResult(name=TOOL_KNOWLEDGE, kind="knowledge", error="knowledge_search 需要 query")
 
-    label = "正在检索本地知识库…"
+    # ★ 这一句会**原样显示在游客端的工具轨迹里**（Agent.vue 的 .tstep__label）。
+    #   原来写的是"正在检索本地知识库…" —— "本地知识库"是我们的实现口径，
+    #   游客看到只会困惑。改成"正在查资料…"，说的是游客能理解的事。
+    #   注意：这是展示文案，**不动 TOOL_KNOWLEDGE 这个工具名**，
+    #   前端的卡片分支与后端的路由都按 name 匹配，改 name 会连带改坏两处。
+    label = "正在查资料…"
     hits = store.query(query, top_k)
     if not hits:
         return ToolResult(

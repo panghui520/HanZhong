@@ -248,7 +248,7 @@ def plan(
     for stop in stops:
         by_district[stop.district].append(stop)
     if not by_district:
-        return Itinerary(days=[], minutes_per_day=minutes_per_day, notes=["数据包里没有可排的游览点。"])
+        return Itinerary(days=[], minutes_per_day=minutes_per_day, notes=["目前没有可排的游览点。"])
 
     order = sorted(
         by_district, key=lambda d: (-sum(s.duration_min for s in by_district[d]), d)
@@ -291,8 +291,10 @@ def plan(
             break
 
     if len(plans) < days:
+        # ★ 面向游客（2026-09-28）：这里原来写"数据包里可排的游览点只够 X 天"——
+        #   "数据包"是我们的实现口径。改成"目前可排的游览点"。
         notes.append(
-            f"数据包里可排的游览点只够 {len(plans)} 天，没有凑满 {days} 天 —— "
+            f"目前可排的游览点只够 {len(plans)} 天，没有凑满 {days} 天 —— "
             "宁可少排一天，也不重复推荐同一个点。"
         )
     if start_district and start_district in by_district:

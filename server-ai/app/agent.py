@@ -171,7 +171,9 @@ class AgentService:
         if amap_ok:
             groups.append(
                 {
-                    "title": "调用高德地图（真实 POI）",
+                    # ★ 游客端分组标题：不说"调用高德地图"、不写 POI ——
+                    #   那是我们的技术栈口径。说游客能得到的：找到真实的地方。
+                    "title": "找真实的地方（酒店、餐厅、景点）",
                     "items": [
                         "汉中高铁站附近推荐酒店",
                         # 举一个**区县**的例子：汉中有 2 区 9 县，用户不知道
@@ -185,7 +187,8 @@ class AgentService:
 
         groups.append(
             {
-                "title": "排行程（读本地数据包，不需要联网）",
+                # ★ 同上：不写"读本地数据包、不需要联网"，只说"按天数排一份行程"。
+                "title": "排一份行程（按天数自动安排）",
                 "items": [
                     "帮我规划汉中两日游",
                     "汉中三天怎么玩",
@@ -196,7 +199,10 @@ class AgentService:
 
         groups.append(
             {
-                "title": "查本地知识库（有出处的公开资料）",
+                # ★ 这是游客端「试试这样问」的分组标题，会直接显示给游客。
+                #   原来写的是"查本地知识库（有出处的公开资料）"——"知识库"是我们的实现口径。
+                #   改成说内容本身：汉中的来历与风物。
+                "title": "汉中的来历与风物（都有出处）",
                 "items": [
                     "汉中仙毫是什么茶",
                     "汉中天坑群在哪里",
@@ -341,7 +347,9 @@ class AgentService:
         if name == tools.TOOL_POI:
             return f"正在搜索「{args.get('keywords') or ''}」…"
         if name == tools.TOOL_KNOWLEDGE:
-            return "正在检索本地知识库…"
+            # 与 tools.py 里 _knowledge_search 的 label 保持同一句话：
+            # 这个 label 会原样出现在游客端的工具轨迹上，不能写实现口径（"本地知识库"）。
+            return "正在查资料…"
         if name == tools.TOOL_PLAN:
             # 天数可能来自模型、也可能没给（工具会按 2 天兜底）。这里不猜，
             # 给不出天数就只说"正在排行程"，不编一个"2 天"进 label ——
@@ -433,19 +441,27 @@ class AgentService:
             yield piece
 
     def _scope_text(self) -> str:
+        """覆盖范围的一句话说明。给用户看，也塞进提示词。"""
         by_type_docs = self.store.manifest().get("by_type_docs", {})
         return (
-            f"当前知识库覆盖{self.settings.city_name}的地理气候、历史文化、生态与物产等公开资料，"
-            f"以及 {by_type_docs.get('poi', 0)} 个资源点、"
+            f"覆盖{self.settings.city_name}的地理气候、历史文化、生态与物产等公开资料，"
+            f"以及 {by_type_docs.get('poi', 0)} 处好去处、"
             f"{by_type_docs.get('experience', 0)} 项乡村体验、"
-            f"{by_type_docs.get('product', 0)} 款乡村产品。"
+            f"{by_type_docs.get('product', 0)} 款乡村好物。"
         )
 
     def _offline_text(self, question: str) -> str:
+        """没有模型、也没有检索命中时的兜底回答。
+
+        ★ 面向游客（2026-09-28）：这里原来写的是"当前处于离线演示模式（未配置大模型），
+          我无法调用高德地图查询真实地点…配置 LLM_API_KEY 与 AMAP_KEY 之后…" ——
+          把环境变量名和实现口径写进了**给游客的回答**里。改成说人话，
+          同时保留"能力受限"这个如实告知（不假装什么都能答）。
+          配置指引留在 .env 与 README，不该出现在答案里。
+        """
         return (
-            "当前处于离线演示模式（未配置大模型），我无法调用高德地图查询真实地点，"
-            "也回答不了知识库之外的问题。\n\n"
+            "这一问暂时没找到可核对的资料。当前只能查到本地整理过的内容，"
+            "没法实时搜索周边的酒店、餐厅与景点。\n\n"
             f"{self._scope_text()}\n\n"
-            "配置 LLM_API_KEY 与 AMAP_KEY 之后，我可以搜索真实酒店、餐厅与景点，"
-            "并把结果整理成可核对的推荐。"
+            "换个说法，或者问问上面这些方向，我再找找。"
         )

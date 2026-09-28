@@ -475,7 +475,7 @@ onBeforeUnmount(() => {
       <p v-if="error" class="imap__err">景点数据加载失败：{{ error }}</p>
       <p v-else-if="loading" class="imap__err">正在读取景点数据…</p>
       <p v-else class="imap__foot">
-        标注位置来自数据包中整理的经纬度，为便于展示做过近似；出行请以景区公告与地图导航为准。
+        标注位置为整理后的近似坐标，仅供大致参考；出行请以景区公告与地图导航为准。
       </p>
     </div>
   </div>

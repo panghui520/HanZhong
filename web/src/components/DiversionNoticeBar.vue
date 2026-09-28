@@ -1,9 +1,9 @@
 <script setup lang="ts">
 /**
- * DiversionNoticeBar —— 分流公告（M5 续）
+ * DiversionNoticeBar —— 今日游览建议（内部仍叫"分流公告"，M5 续）
  *
  * **这是本项目里第一个"系统主动对游客说话"的界面。**在此之前游客端全是
- * "你点哪里我给你看哪里"；这条是说"我们发现某个点挤了，你可以换个去处"。
+ * "你点哪里我给你看什么"；这条是说"我们发现某个点挤了，你可以换个去处"。
  * 所以三件事要克制：
  *
  * 1. **不喊"已满"**。文案一律沿用后端给的原文（"当前客流较高"），
@@ -12,7 +12,14 @@
  *    界面把组名显式写出来，让"乡村优先"这件事看得见，而不是一个混在一起的列表。
  * 3. **快照与当前两组数分开显示**。公告发布后承载还会变，发布时说 B 村 23%、
  *    现在可能已经 91%。只显示旧数等于骗游客，只显示新数就答不出"为什么是它"。
- *    所以当前与发布时差得多时，两个数都写出来。
+ *    所以当前与发布时差得多时，两个说法都写出来。
+ *
+ * ★ 面向游客的用词（2026-09-28）：
+ *   徽标从「分流提示」改成「今日游览建议」，chip 里的「承载 23%」改成
+ *   「人少 / 人不算多 / 人较多」，组提示「本项目的承接重点」改成「人少、离得近」。
+ *   理由是同一条：**"分流""承载""项目"都是我们内部的语言**，
+ *   游客站在首页看到它们只会觉得走错了地方。
+ *   后端字段名（current_usage / available）不动，只改展示层。
  *
  * ============================================================
  * 2026-09-27 二次重构：从「整幅强调带」改为「一张紧凑卡片」
@@ -77,9 +84,23 @@ const props = withDefaults(
   { variant: 'band' }
 )
 
-/** 承载占用率文案。**读不到给"—"**，不要显示成 0%（"不知道"不是"很空"） */
+/**
+ * 承载占用率 → 游客看得懂的说法。
+ *
+ * ★ 为什么不直接写百分比：那是运营口径。游客看到"23%"不知道算多算少，
+ *   看到"87%"又会以为"满了别去" —— **一个需要用户自己去解释的数字，等于没传达信息**。
+ *   换成定性说法，判断成本为零。
+ *   阈值 40 / 70 只管"读起来什么感觉"，与后端 `available`（管"还能不能推荐"）
+ *   各管一件事，所以两边档位不完全一致也不会自相矛盾。
+ *
+ * ★ **读不到一律给"—"**，绝不能落进"人少"那一档 —— "不知道"不是"很空"。
+ *   这条是原注释就强调过的，换文案时最容易顺手写错。
+ */
 function usageText(u: number | undefined): string {
-  return u == null ? '—' : `${Math.round(u * 100)}%`
+  if (u == null) return '—'
+  if (u < 0.4) return '人少'
+  if (u < 0.7) return '人不算多'
+  return '人较多'
 }
 
 /** 距离文案：km 保留一位，够用且不啰嗦 */
@@ -106,7 +127,9 @@ const groups = computed(() =>
     {
       key: 'rural',
       label: '就近乡村',
-      hint: '本项目的承接重点',
+      // ★ 原来写的是"本项目的承接重点" —— 那是项目内部的定位说法，
+      //   游客看到会想"什么项目？"。改成说人少、说距离，这是游客真正在意的两件事。
+      hint: '人少、离得近',
       items: props.notice.candidates.filter((c) => c.business_type === 'RURAL_SPOT'),
     },
     {
@@ -138,7 +161,7 @@ const groups = computed(() =>
             stroke-linejoin="round"
           />
         </svg>
-        分流提示
+        今日游览建议
       </span>
       <!--
         仿真数据标注由后端给（notice.synthetic），前端不写死。
@@ -204,11 +227,16 @@ const groups = computed(() =>
                 </svg>
               </span>
 
+              <!--
+                ★ 这里原来是「12.3 km · 承载 23%」。百分比是运营指标，
+                  游客看了不知道算多算少；而且它和"该不该去"之间还隔着一层换算。
+                  现在只留一句定性的话（人少 / 人不算多 / 人较多），
+                  "承载"这个标签也一并去掉 —— "12.3 km · 人少"已经说完了。
+              -->
               <span class="dnb__chip-metrics">
                 <span class="num dnb__mv">{{ kmText(c.km) }}</span>
                 <i class="dnb__sep" aria-hidden="true" />
-                <span class="dnb__mk">承载</span>
-                <span class="num dnb__mv" :class="{ 'is-unknown': c.current_usage == null }">
+                <span class="dnb__mv" :class="{ 'is-unknown': c.current_usage == null }">
                   {{ usageText(c.current_usage) }}
                 </span>
                 <!-- 读不到承载时说明一句，否则"—"会被当成排版错误 -->
@@ -217,7 +245,7 @@ const groups = computed(() =>
 
               <!-- 发布时与当前差得多，两个数都写出来，别拿旧数据骗游客 -->
               <span v-if="drifted(c)" class="dnb__chip-drift">
-                推荐时为 {{ usageText(c.usage) }}，已变化
+                发布时{{ usageText(c.usage) }}，现已变化
               </span>
             </router-link>
           </li>
@@ -514,9 +542,8 @@ const groups = computed(() =>
   background: var(--line);
 }
 
-.dnb__mk {
-  color: var(--warm-500);
-}
+/* `.dnb__mk`（原来是"承载"两个字的小标签）已随百分比一起删除 ——
+   现在那一格是"人少 / 人不算多 / 人较多"，自解释，不需要前缀标签。 */
 
 .dnb__chip-flag {
   margin-left: auto;
