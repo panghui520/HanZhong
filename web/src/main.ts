@@ -6,6 +6,8 @@ import { setUnauthorizedHandler } from './api/http'
 import { useSessionStore } from './stores/session'
 import './styles/tokens.css'
 import './styles/base.css'
+// 管理端共享样式。全部选择器挂在 .theme-admin 下，游客端匹配不到（见文件头注释）
+import './styles/admin.css'
 
 const app = createApp(App)
 const pinia = createPinia()

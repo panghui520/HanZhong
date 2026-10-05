@@ -36,6 +36,16 @@ import { useNotice } from '@/composables/useNotice'
 import { when } from '@/utils/format'
 import type { Order, OrderAction, OrderStatus } from '@/types'
 
+/**
+ * 2026-10-04：从一级页面「订单处理」降级为**农产品管理页里的一个 tab**。
+ *
+ * 订单是农产品这条业务线的末端（卖货 → 发货 → 售后），单独占一个一级入口
+ * 会让"卖货"和"发货"分家。所以这里加 `embedded` 开关：内嵌时**不渲染页头**
+ * （页面已经有了自己的标题与统计区间），其余逻辑一行没动 ——
+ * 订单状态机是已验收的东西，重写一遍只会引入新 bug。
+ */
+withDefaults(defineProps<{ embedded?: boolean }>(), { embedded: false })
+
 const orders = ref<Order[]>([])
 const loading = ref(true)
 const busyId = ref<number | null>(null)
@@ -220,9 +230,15 @@ const can = (o: Order, a: OrderAction) => o.available_actions.includes(a)
 
 <template>
   <div class="aorders">
-    <header class="aorders__head">
+    <header v-if="!embedded" class="aorders__head">
       <div>
-        <span class="eyebrow">消费与离境复购</span>
+        <!--
+          原稿写的是「消费与离境复购」。**"离境复购"这个说法已废弃**：
+          当前复购率的口径是 `SUM(repurchases)/SUM(purchases)`（笔数比），
+          统计表没有用户身份维度，算不出用户级复购，更谈不上"离境"。
+          一个被否掉的词留在副标题里，比留在正文里更危险 —— 页头是答辩时会被念出来的。
+        -->
+        <span class="eyebrow">订单与售后</span>
         <h1 class="h1 aorders__title">订单处理</h1>
         <p class="aorders__sub">
           游客在「乡村好物」提交的订单都在这里。每一单的明细都带着下单时的体验锚点与产地快照 ——

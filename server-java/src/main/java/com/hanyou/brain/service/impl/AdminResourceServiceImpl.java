@@ -79,6 +79,7 @@ public class AdminResourceServiceImpl implements AdminResourceService {
     private static final String BIZ_SCENIC = "SCENIC";
     private static final String BIZ_RURAL = "RURAL_SPOT";
     private static final String BIZ_FOOD = "FOOD";
+    private static final String BIZ_LODGING = "LODGING";
 
     /** 景点入口下的两个业态。乡村旅游与景区同属"景点"，管理端不为它们各开一个入口 */
     private static final Set<String> SCENIC_TYPES = Set.of(BIZ_SCENIC, BIZ_RURAL);
@@ -561,16 +562,28 @@ public class AdminResourceServiceImpl implements AdminResourceService {
         if (TYPE_FOOD.equals(type)) {
             return Set.of(BIZ_FOOD);
         }
+        if (TYPE_LODGING.equals(type)) {
+            // 2026-10-04 新增。住宿在 poi 表里本来就有 4 行（business_type=LODGING），
+            // 缺的只是这个入口 —— 在它之前传 type=lodging 会掉进下面的 throw
+            return Set.of(BIZ_LODGING);
+        }
         throw new BizException(ErrorCode.RESOURCE_TYPE_INVALID, "未知的资源类型：" + type);
     }
 
     private String resolveBusinessType(Map<String, Object> body, Set<String> allowed) {
         String raw = BodyReader.str(body, "business_type");
         if (!StringUtils.hasText(raw)) {
-            // 没传就取该入口的主业态（景点默认景区、美食只有餐饮）。
+            // 没传就取该入口的主业态：景点入口含两个业态（景区 + 乡村），默认景区；
+            // 美食 / 住宿入口各只有一个业态，取那一个。
             // 不用 allowed.iterator().next()：Set.of 的顺序不保证，
             // 那会让"默认值"在不同 JDK 上变成不同的东西。
-            return allowed.contains(BIZ_SCENIC) ? BIZ_SCENIC : BIZ_FOOD;
+            if (allowed.contains(BIZ_SCENIC)) {
+                return BIZ_SCENIC;
+            }
+            if (allowed.contains(BIZ_LODGING)) {
+                return BIZ_LODGING;
+            }
+            return BIZ_FOOD;
         }
         String v = raw.trim().toUpperCase();
         if (!allowed.contains(v)) {

@@ -35,17 +35,28 @@ public interface AdminResourceService {
     /** 资源类型：美食 */
     String TYPE_FOOD = "food";
 
+    /**
+     * 资源类型：住宿。
+     *
+     * <p>2026-10-04 新增 —— 管理端重构出「住宿管理」一级页面后才有这个入口。
+     * 在它之前 {@code /admin/resources/pois} 只认 {@code scenic} / {@code food}，
+     * 传 {@code lodging} 会被 {@code businessTypesOf} 拒掉（"未知的资源类型"）。
+     * 数据一直是有的（{@code poi.business_type = LODGING}，4 个点），
+     * 缺的只是这个入口。
+     */
+    String TYPE_LODGING = "lodging";
+
     /** 资源类型：农产品 */
     String TYPE_PRODUCT = "product";
 
     // ============================================================
-    // 景点 / 美食（poi）
+    // 景点 / 美食 / 住宿（poi）
     // ============================================================
 
     /**
      * 列表。
      *
-     * @param type    资源类型，只接受 {@link #TYPE_SCENIC} 或 {@link #TYPE_FOOD}
+     * @param type    资源类型，只接受 {@link #TYPE_SCENIC} / {@link #TYPE_FOOD} / {@link #TYPE_LODGING}
      * @param keyword 关键词，匹配名称/简介/标签/区县/编码；null 表示不过滤
      * @param status  1 只看上架 / 0 只看下架 / null 全部
      */

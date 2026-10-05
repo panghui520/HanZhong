@@ -75,7 +75,7 @@ FOCUSES: dict[str, Focus] = {
     "overview": Focus(
         key="overview",
         label="运营总览",
-        hint="当日核心景区与乡村的到访、乡村占比，农产品销售与复购，以及待处置风险的总体状况",
+        hint="统计区间内核心景区与乡村的到访、乡村占比，农产品销售与乡村复购，以及待处置风险的总体状况",
         slices=(
             "period_label",
             "synthetic",
@@ -94,13 +94,13 @@ FOCUSES: dict[str, Focus] = {
     "trend": Focus(
         key="trend",
         label="客流与承载趋势",
-        hint="近 7 日每日到访人次与当日承载占用率的变化，以及到访环比",
+        hint="统计区间内逐日到访人次与当日承载占用率的变化，以及到访环比",
         slices=("period_label", "synthetic", "trend", "deltas", "hot_scenic_count", "rural_avg_usage"),
     ),
     "mix": Focus(
         key="mix",
         label="业态客流构成",
-        hint="当日到访在各业态（核心景区 / 乡村旅游 / 餐饮 / 住宿）之间的分布，重点是乡村占比",
+        hint="统计区间内到访在各业态（核心景区 / 乡村旅游 / 餐饮 / 住宿）之间的分布，重点是乡村占比",
         slices=("period_label", "synthetic", "mix", "total_visitors", "rural_visitors", "rural_ratio"),
     ),
     "imbalance": Focus(
@@ -119,7 +119,7 @@ FOCUSES: dict[str, Focus] = {
     "sales": Focus(
         key="sales",
         label="乡村好物销售",
-        hint="乡村产地产品的销售额排行与复购率",
+        hint="乡村产地产品的销售额排行与乡村复购率",
         slices=("period_label", "synthetic", "rural_sales_top", "product_sales", "repurchase_rate", "deltas"),
     ),
     "risks": Focus(
@@ -148,7 +148,7 @@ DEFAULT_FOCUS = "overview"
 # 而且字段一多，模型会开始挑它认识的讲。
 # ===========================================================================
 
-METRIC_GLOSSARY = """★ 两条通用规则，先看这两条再看下面：
+METRIC_GLOSSARY = """★ 三条通用规则，先看这三条再看下面：
 
   (1) **正文里不要出现英文字段名**。指标 JSON 的键是给程序看的，
       正文要写成中文（`open_risks` 写成"未闭环风险事件"，不要写成
@@ -159,27 +159,45 @@ METRIC_GLOSSARY = """★ 两条通用规则，先看这两条再看下面：
       （`trend[].usage`、`imbalance[].scenic`）**不要再乘 100** ——
       73.5 就是 73.5%，不是 7350%。
       两者混用会让某个数字凭空差 100 倍，而且看不出来。
+  (3) **时间口径一律以 `period_label` 为准，不要自己写"近 7 日"**。
+      `period_label` 形如"统计区间 2026-09-28 ～ 2026-10-04（7 天 · 仿真）"，
+      它说明这一批指标覆盖的是哪一段。运营可以把统计区间切成
+      今日 / 近 7 天 / 近 30 天 / 全部四档，**同一组字段的窗口会变**。
+      正文里要么说"该统计区间内"，要么引用 `period_label` 的起止日期；
+      ★ **写死"近 7 日"会在切到别的档位时变成假话**（数字是 30 天的、
+      却说是近 7 日的），而屏幕上两句话并排、没人能看出对不上。
 
-- total_visitors：**当日核心景区**到访人次。不含乡村/餐饮/住宿/交通
+- total_visitors：**当前统计区间内**核心景区到访人次。不含乡村/餐饮/住宿/交通
   （它们与景区到访高度重叠），单位是**人次**，同一人逛两个景区算两次。
   ★ **不要写成"全市客流"或"独立游客数"**。
-- rural_visitors：当日乡村点到访人次，与 total_visitors 同口径。
+  ★ **也不要写成"当日"** —— 只有"今日"档区间才是 1 天；切到近 7 天 /
+  近 30 天 / 全部时它是整段区间的**合计**，写成"当日"就把 30 天的数说成一天的。
+  区间是几天看 `period_label`；说不清就用"该统计区间内"。
+- rural_visitors：当前统计区间内乡村点到访人次，与 total_visitors 同口径
+  （同样**不要说成"当日"**）。
 - rural_ratio：乡村到访 ÷（核心景区 + 乡村），★ **不是**占全市到访的比例。
-- product_sales：近 7 日农产品销售额，单位元。
-- repurchase_rate：近 7 日离境复购率 = 复购单数 ÷ 总单数，0–1 的小数。
+- product_sales：**当前统计区间内**农产品销售额，单位元。区间是几天，
+  看 `period_label`（它写明了起止日期与天数）—— 不要说成固定"近 7 日"。
+- repurchase_rate：**当前统计区间内**乡村复购率 = **复购笔数 ÷ 购买笔数**，
+  0–1 的小数。★ 这是**笔数比**，统计口径是"资源点 × 天"的汇总，
+  **没有用户身份维度**，所以它**不是**"离境消费的用户里有多少又买了"
+  这种**用户级**复购率。称呼固定用"乡村复购率"，
+  ★ **不要写成"离境复购率"或"用户复购率"** —— 那会把一个笔数比说成用户留存率。
 - open_risks：当前**未闭环**的风险事件数。
-- hot_scenic_count：承载占用率 ≥ 80% 的核心景区**个数**。
+- hot_scenic_count：统计区间内**平均**承载占用率 ≥ 80% 的核心景区**个数**
+  （不是"某一天超 80% 的次数"，也不是客流人数）。
 - idle_districts：景区高位但乡村闲置的**区县名**。
-- rural_avg_usage：乡村点平均承载占用率，0–1 的小数（不是人数）。
+- rural_avg_usage：乡村点在统计区间内的**平均**承载占用率，0–1 的小数（不是人数）。
 - deltas.*：与上一个同等长度窗口的真实环比，不是写死的。
 - trend[].visitors：**该日**的核心景区到访人次 —— 与 total_visitors 同口径，
-  只是逐日展开成 7 天。★ 不要说成"近 7 日的当日到访"这类自相矛盾的话。
+  只是逐日展开成 `period_label` 所说天数（7 天档是 7 个点，近 30 天档是 30 个点）。
+  ★ 不要说成"近 7 日的当日到访"这类自相矛盾的话。
   trend[].usage：该日整体承载占用率，**单位是百分比数值**（73.5 表示 73.5%）。
-- mix[].name / mix[].value：该业态名称 / 该业态当日到访人次。
-- imbalance[].scenic / imbalance[].rural：该区县景区 / 乡村的
+- mix[].name / mix[].value：该业态名称 / 该业态在统计区间内的到访人次。
+- imbalance[].scenic / imbalance[].rural：该区县景区 / 乡村在统计区间内的
   **平均承载占用率，单位是百分比数值**（102 表示 102%）。
   ★ **它们不是客流人数，不要说成"客流"**。
-- rural_sales_top[].sales：该乡村点近 7 日销售额，单位元。
+- rural_sales_top[].sales：该乡村点**当前统计区间内**销售额，单位元。
 - risks[]：规则引擎命中的风险事件明细，★ **含已建单与已闭环的历史**
   （看 status 字段），所以它的条数不一定等于 open_risks。"""
 
@@ -302,6 +320,22 @@ def _pctnum(value: Any) -> str:
         return "—"
 
 
+def _range_prefix(metrics: Mapping[str, Any]) -> str:
+    """把快照的 `range` 档位翻译成指标卡上那个周期前缀。
+
+    ★ 必须与前端 `Dashboard.vue` 的 `rangePrefix` **是同一套词**。
+    依据（basis）是"给人对着面板核"的那一份，标签差一个字就核不上 ——
+    而"核不上"在界面上表现为"这两个数好像是两回事"，比不显示更糟。
+    不认识的档位（含老缓存里没有 `range` 的情况）回落"今日"，
+    与后端 `normalizeRange` 的回落方向保持一致。
+    """
+    return {
+        "LAST7": "近 7 日",
+        "LAST30": "近 30 日",
+        "ALL": "全部",
+    }.get(str(metrics.get("range") or "").upper(), "今日")
+
+
 def basis_of(focus: Focus, metrics: Mapping[str, Any]) -> list[dict[str, str]]:
     """「模型依据的是这些数」。
 
@@ -314,37 +348,46 @@ def basis_of(focus: Focus, metrics: Mapping[str, Any]) -> list[dict[str, str]]:
     `total_visitors` 标成"近 7 日到访总量"，它其实是**当日核心景区**到访。
     依据上的口径写错，模型就会照着错的讲 —— 这一段的可信度全在措辞准确上。
 
+    ★ **周期前缀必须随档位走**（2026-10-04 加）。加了统计区间切换之后，
+    同一个 `total_visitors` 在"今日"档是 1 天的数、在"近 30 天"档是 30 天的
+    合计。标签写死"当日"的话，切到近 30 天时依据上会出现
+    "当日核心景区到访 2,370,783 人次" —— 一个把 30 天说成 1 天的假话，
+    而它就印在"你能对着核"的那一栏里。前缀与前端 `rangePrefix` 同一套词。
+
     除总览外，每个关注点都**把自己那一段明细的头几行列出来**：
     只给一两个汇总数，模型讲细节时就没有可核对的锚点。
     """
     rows: list[dict[str, str]] = []
     add = lambda label, value: rows.append({"label": label, "value": value})  # noqa: E731
+    p = _range_prefix(metrics)
 
     if focus.key in ("overview", "trend"):
-        add("当日核心景区到访", f"{_int(metrics.get('total_visitors'))} 人次")
+        add(f"{p}核心景区到访", f"{_int(metrics.get('total_visitors'))} 人次")
         add("到访环比", f"{float(metrics.get('deltas', {}).get('visitors_pct') or 0):+.1f}%")
     if focus.key == "trend":
-        points = [p for p in (metrics.get("trend") or []) if isinstance(p, dict)]
+        points = [p_ for p_ in (metrics.get("trend") or []) if isinstance(p_, dict)]
         if points:
-            peak = max(points, key=lambda p: p.get("visitors") or 0)
-            low = min(points, key=lambda p: p.get("visitors") or 0)
+            peak = max(points, key=lambda x: x.get("visitors") or 0)
+            low = min(points, key=lambda x: x.get("visitors") or 0)
+            # 趋势图的窗口是 max(range, 7 天) —— 所以峰谷的周期**按点数说**，
+            # 不按 range 说。否则"今日"档会标成"今日峰值"而它其实是 7 天的峰值。
             add(
-                "近 7 日峰值",
+                f"近 {len(points)} 日峰值",
                 f"{peak.get('date')} {_int(peak.get('visitors'))} 人次 / 承载 {_pctnum(peak.get('usage'))}",
             )
             add(
-                "近 7 日低谷",
+                f"近 {len(points)} 日低谷",
                 f"{low.get('date')} {_int(low.get('visitors'))} 人次 / 承载 {_pctnum(low.get('usage'))}",
             )
     if focus.key in ("overview", "mix"):
-        add("乡村旅游到访", f"{_int(metrics.get('rural_visitors'))} 人次")
-        add("乡村旅游客流占比", _pct(metrics.get("rural_ratio")))
+        add(f"{p}乡村旅游到访", f"{_int(metrics.get('rural_visitors'))} 人次")
+        add(f"{p}乡村旅游客流占比", _pct(metrics.get("rural_ratio")))
     if focus.key == "mix":
         for item in (metrics.get("mix") or [])[:4]:
-            add(f"{item.get('name')}到访", f"{_int(item.get('value'))} 人次")
+            add(f"{p}{item.get('name')}到访", f"{_int(item.get('value'))} 人次")
     if focus.key in ("overview", "imbalance"):
-        add("承载超 80% 的核心景区", f"{metrics.get('hot_scenic_count', '—')} 处")
-        add("乡村点平均承载", _pct(metrics.get("rural_avg_usage")))
+        add(f"{p}承载超 80% 的核心景区", f"{metrics.get('hot_scenic_count', '—')} 处")
+        add(f"{p}乡村点平均承载", _pct(metrics.get("rural_avg_usage")))
         idle = metrics.get("idle_districts") or []
         if idle:
             add("景区高位与乡村低位并存", "、".join(idle))
@@ -355,16 +398,19 @@ def basis_of(focus: Focus, metrics: Mapping[str, Any]) -> list[dict[str, str]]:
                 f"{_pctnum(row.get('scenic'))} / {_pctnum(row.get('rural'))}",
             )
     if focus.key in ("overview", "sales"):
-        add("乡村产地产品销售额", _yuan(metrics.get("product_sales")))
-        add("复购率", _pct(metrics.get("repurchase_rate")))
+        add(f"{p}乡村产地产品销售额", _yuan(metrics.get("product_sales")))
+        # 标签写全称"乡村复购率"并附口径：这里是**依据**，是给人核对的那一份，
+        # 名称必须和面板上的指标卡一字不差，否则"核对"就无从谈起。
+        add(f"{p}乡村复购率（复购笔数 / 购买笔数）", _pct(metrics.get("repurchase_rate")))
     if focus.key == "sales":
         for row in (metrics.get("rural_sales_top") or [])[:3]:
             add(str(row.get("name")), _yuan(row.get("sales")))
     if focus.key in ("overview", "risks"):
-        # 标签写"全部"：它是**全市**未闭环数，与下面"快照明细"的条数不是一回事
-        # （快照只挑了 5 条展示）。不写清会出现"16 条"和"其中 3 条"并排，
-        # 看的人只会以为有一个数错了。
-        add("未闭环风险事件（全部）", f"{metrics.get('open_risks', '—')} 条")
+        # 括号里写"全部点位"而不是"全部"：它是**全市所有点位**的未闭环数，
+        # 与下面"快照明细"的条数不是一回事（快照只挑了 5 条展示）。
+        # ★ 不能只写"（全部）" —— 加了统计区间档位之后，"全部"这个词
+        # 已经被"全部（时间）档"占用了，两个意思混在一个词里必被读错。
+        add(f"{p}未闭环风险事件（全部点位）", f"{metrics.get('open_risks', '—')} 条")
     if focus.key == "risks":
         detail = [r for r in (metrics.get("risks") or []) if isinstance(r, dict)]
         add("快照中的风险明细", f"{len(detail)} 条（含已建单/已闭环）")
@@ -511,7 +557,10 @@ def _result(
         "period_label": metrics.get("period_label"),
         "synthetic": bool(metrics.get("synthetic", True)),
         "sections": [dict(s) for s in sections],
-        "basis": basis_of(focus, sliced),
+        # 传**全量** metrics 而不是 sliced：basis 的标签要按档位加周期前缀
+        # （"近 30 日乡村复购率"），前缀要从 `range` 取，而 `range` 不在切片里。
+        # 加哪些行仍由 focus 决定（见函数内的 if），所以传全量不会多出行来。
+        "basis": basis_of(focus, metrics),
     }
 
 

@@ -13,8 +13,14 @@ import { request } from './http'
  * 只会多一份要同步维护的代码。农产品走 `/products`。
  */
 
-/** `/pois` 端点只接受这两个值；农产品走 `/products` */
-export type PoiKind = 'scenic' | 'food'
+/**
+ * `/pois` 端点接受的值；农产品走 `/products`。
+ *
+ * `lodging` 是 2026-10-04 加的 —— 管理端重构出「住宿管理」页面后才有这个入口。
+ * 在它之前后端 `businessTypesOf` 只认 scenic / food，传 lodging 会抛
+ * "未知的资源类型"。数据一直是有的（`poi.business_type = LODGING`，4 个点）。
+ */
+export type PoiKind = 'scenic' | 'food' | 'lodging'
 
 type ListParams = { keyword?: string; status?: number }
 

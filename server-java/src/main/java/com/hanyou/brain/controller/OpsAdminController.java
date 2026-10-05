@@ -22,6 +22,7 @@ import com.hanyou.brain.common.Result;
 import com.hanyou.brain.service.DiversionService;
 import com.hanyou.brain.service.OpsService;
 import com.hanyou.brain.service.support.AiClient;
+import com.hanyou.brain.vo.OpsBusinessVO;
 import com.hanyou.brain.vo.OpsSnapshotVO;
 import com.hanyou.brain.vo.RiskEventVO;
 import com.hanyou.brain.vo.WorkOrderVO;
@@ -65,10 +66,46 @@ public class OpsAdminController {
     private final AiClient aiClient;
     private final ObjectMapper objectMapper;
 
-    /** 运营快照：大屏的 6 组图表。全部为仿真数据，见 OpsService 的口径说明 */
+    /**
+     * 运营快照：大屏的 6 组图表。全部为仿真数据，见 OpsService 的口径说明。
+     *
+     * <p><b>{@code range} 是 2026-10-04 加的可选档位</b>（驾驶舱顶部日期控件用）：
+     * {@code TODAY}（默认）/ {@code LAST7} / {@code ALL}。不传或不认识 → 按 {@code TODAY}，
+     * 也就是**这个参数加上之前的行为**。为什么不是新开一个接口：窗口化的取数
+     * 与已有的 {@code snapshot()} 是同一份逻辑（都走 {@code sumWindow}），
+     * 新开一个端点会让"大屏的数字"有两个来源，迟早漂移。
+     */
     @GetMapping("/ops/snapshot")
-    public Result<OpsSnapshotVO> snapshot() {
-        return Result.ok(opsService.snapshot());
+    public Result<OpsSnapshotVO> snapshot(
+            @RequestParam(name = "range", required = false) String range) {
+        return Result.ok(opsService.snapshot(range));
+    }
+
+    /**
+     * 单业态运营分析（管理端四大业务页面：农产品 / 乡村景点 / 餐饮 / 住宿）。
+     *
+     * <p><b>为什么不复用 {@code /ops/snapshot}：</b>那是给驾驶舱的"全局总览"——
+     * 只有聚合值与 Top6 乡村销售额。业务页面要的是**按业态 × 区间的明细**：
+     * 每个资源点的排行、逐日趋势、区县分布、承载构成、冷热散点。
+     * 也不能复用 {@code /stats/pois}：那是**公开端点**（游客端读拥挤度），
+     * 而且只有"今日 + 近 7 日"、不接受 {@code range}。
+     *
+     * <p><b>它与 snapshot 是同一套算法</b>，不是第二套统计：两者都走
+     * {@code loadContext} → {@code windowDays} → {@code sumWindow} /
+     * {@code avgUsageByPoi} / {@code avgPriceByPoi}。所以驾驶舱的销售额与
+     * 农产品页的销售额必然相等 —— 对不上就是 bug，不是"口径不同"。
+     *
+     * <p>{@code type} 不认识时返回 <b>1002</b> 而不是静默回落：业务页拿到
+     * 别的业态的数据，图上会画出一条看起来正常但完全无关的曲线。
+     *
+     * @param type  scenic（核心景区）/ rural（乡村景点）/ food（餐饮）/ lodging（住宿）/ product（农产品）
+     * @param range TODAY / LAST7 / LAST30 / ALL，不传表示 TODAY
+     */
+    @GetMapping("/ops/business")
+    public Result<OpsBusinessVO> business(
+            @RequestParam(name = "type") String type,
+            @RequestParam(name = "range", required = false) String range) {
+        return Result.ok(opsService.business(type, range));
     }
 
     /**
@@ -111,10 +148,18 @@ public class OpsAdminController {
      * （模型失败且没有可回放的缓存）**不是错误** —— Python 会返回
      * {@code mode=unavailable} 并附一段说明，前端照常展示即可。
      * 把这种情况报成 500 会让驾驶舱整块变红，而它其实只是这一小块暂时没内容。
+     *
+     * <p><b>{@code range} 与 {@code /ops/snapshot} 用同一个参数（2026-10-04 加）：</b>
+     * 这一层取指标的口径必须与驾驶舱**完全同源**。在加这个参数之前，
+     * 本接口固定取 {@code TODAY} —— 于是用户把顶部档位切到"近 30 天"后，
+     * KPI 卡是 30 天的数，而右侧 AI 解读的三段正文与「依据」还是**今日**的数。
+     * 两个数字并排出现在同一屏、没有任何报错，是这一页最难被发现的一种错。
+     * 不传或不认识 → 回落 {@code TODAY}，也就是加这个参数之前的行为。
      */
     @PostMapping("/ops/analyze")
     public Result<Map<String, Object>> analyzeOps(@RequestBody(required = false) Map<String, Object> body) {
-        String focus = BodyReader.str(body == null ? Map.of() : body, "focus");
+        Map<String, Object> b = body == null ? Map.of() : body;
+        String focus = BodyReader.str(b, "focus");
         if (focus == null || focus.isBlank()) {
             focus = "overview";
         }
@@ -125,7 +170,7 @@ public class OpsAdminController {
             return Result.fail(ErrorCode.AI_DISABLED);
         }
 
-        OpsSnapshotVO snapshot = opsService.snapshot();
+        OpsSnapshotVO snapshot = opsService.snapshot(BodyReader.str(b, "range"));
         // 转成 Map 而不是把 VO 直接塞进请求体：VO 的字段名（totalVisitors）
         // 与 Python 期望的键（total_visitors）差一个命名策略，而全局 Jackson
         // 已经配了 snake_case —— 走一次 convertValue 就自动对齐，

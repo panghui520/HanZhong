@@ -3,6 +3,7 @@ package com.hanyou.brain.service;
 import java.util.List;
 
 import com.hanyou.brain.vo.DiversionCandidateVO;
+import com.hanyou.brain.vo.OpsBusinessVO;
 import com.hanyou.brain.vo.OpsSnapshotVO;
 import com.hanyou.brain.vo.PoiStatVO;
 import com.hanyou.brain.vo.RiskEventVO;
@@ -30,8 +31,47 @@ public interface OpsService {
      */
     int scan();
 
-    /** 运营快照：管理端大屏的 6 组图表 */
+    /** 运营快照：管理端大屏的 6 组图表。默认区间（等价于 {@code snapshot("TODAY")}） */
     OpsSnapshotVO snapshot();
+
+    /**
+     * 运营快照，指定统计区间。
+     *
+     * <p>区间档位只有四个，**复用 M5 已有的风险统计日口径**（基准日 =
+     * 数据包里最新的一天，见 {@code OpsServiceImpl.loadContext}）：
+     * <ul>
+     *   <li>{@code TODAY}  —— 基准日当天（默认）；</li>
+     *   <li>{@code LAST7}  —— 基准日往前 7 天（含当天）；</li>
+     *   <li>{@code LAST30} —— 基准日往前 30 天（含当天）；</li>
+     *   <li>{@code ALL}    —— 数据包覆盖的全部天数。</li>
+     * </ul>
+     * 全屏所有指标与图表都按同一个窗口算，不再是"客流当日 + 消费近 7 日"的混合口径。
+     * 无法识别的取值一律回落到 {@code TODAY}（不报错：大屏宁可按默认档显示，
+     * 也不该因为一个 query 参数拼错就整块变红）。
+     *
+     * @param range TODAY / LAST7 / LAST30 / ALL，null 或空表示 TODAY
+     */
+    OpsSnapshotVO snapshot(String range);
+
+    /**
+     * 单个业态的运营分析（管理端四大业务页面）。
+     *
+     * <p><b>与 {@link #snapshot(String)} 是同一套算法。</b>两者都走
+     * {@code loadContext} → {@code windowDays} → {@code sumWindow} /
+     * {@code avgUsageByPoi} / {@code avgPriceByPoi}，同一个窗口、同一份求和、
+     * 同一个均价口径。所以"驾驶舱的销售额"与"农产品页的销售额"必然相等。
+     *
+     * <p>为什么 snapshot 不够用：它给的是**全局聚合值** + Top6 乡村销售额。
+     * 业务页面要的是**按业态 × 区间的明细** —— 每个资源点的排行、逐日趋势、
+     * 区县分布、承载构成、冷热散点。
+     *
+     * @param type  业态短名：{@code scenic}（核心景区）/ {@code rural}（乡村景点）/
+     *              {@code food}（餐饮）/ {@code lodging}（住宿）/ {@code product}（农产品）。
+     *              无法识别时抛 {@code 1002}（请求参数不合法），
+     *              不静默回落 —— 业务页拿错业态的数据比报错更糟
+     * @param range TODAY / LAST7 / LAST30 / ALL，null 或空表示 TODAY
+     */
+    OpsBusinessVO business(String type, String range);
 
     /**
      * 风险事件列表。

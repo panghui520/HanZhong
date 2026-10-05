@@ -1,0 +1,424 @@
+/* ============================================================
+   管理端共享样式（2026-10-04 管理员端信息架构重构）
+
+   为什么要有这一份：
+
+   重构前 Dashboard / Media / Resources / Orders / Risks 五个页面**各自**在自己
+   的 `<style scoped>` 里定义了一遍 `.panel` / `.field` / `.btn` / `.rt` / `.modal` ——
+   同样的几十行复制了五份。新的 7 个页面如果继续这么干就是复制七份，而且
+   "改一处忘一处"不会报错，只会让某个页面的输入框悄悄长成另一个样子。
+
+   ★ 全部选择器都挂在 `.theme-admin` 下（管理端根元素上的类，见 AdminLayout.vue）。
+     这不是为了好看，是两个硬性原因：
+
+     1. **不能污染游客端。** `.btn` / `.card` 在 base.css 里已经有游客端定义，
+        这里若写全局 `.btn` 会把游客端的按钮覆盖掉。挂在 `.theme-admin` 下之后，
+        游客端根本匹配不到这些规则。
+     2. **优先级要够低。** 旧页面（Dashboard / Media / Risks）仍带着自己的 scoped
+        定义，`.theme-admin .panel` 与 `.panel[data-v-x]` 同权重（0,2,0），
+        而组件样式在运行时后注入 → 旧页面维持原样、新页面吃这份。等旧页面
+        全部下线后，这份就是唯一的定义处。
+
+   类名（`.rt` / `.field` / `.modal` 等）**刻意与旧页面保持一致** ——
+   已有的 CDP 探针按这些选择器断言，改名等于让一批验证无谓失效。
+   ============================================================ */
+
+/* ---------- 面板 ---------- */
+.theme-admin .panel {
+  padding: var(--sp-4);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  background: rgba(18, 48, 38, 0.5);
+}
+
+/* ---------- 提示条（操作反馈） ---------- */
+.theme-admin .notice {
+  margin-bottom: var(--sp-4);
+  padding: var(--sp-3) var(--sp-4);
+  border-radius: var(--r-md);
+  font-size: var(--fs-sm);
+  border: 1px solid transparent;
+}
+.theme-admin .notice--ok {
+  color: #cfe8dc;
+  background: rgba(42, 111, 91, 0.24);
+  border-color: rgba(113, 169, 150, 0.42);
+}
+.theme-admin .notice--err {
+  color: #f3d3ca;
+  background: rgba(168, 64, 43, 0.22);
+  border-color: rgba(168, 64, 43, 0.5);
+}
+.theme-admin .notice-enter-active,
+.theme-admin .notice-leave-active {
+  transition: opacity var(--dur-2) var(--ease);
+}
+.theme-admin .notice-enter-from,
+.theme-admin .notice-leave-to {
+  opacity: 0;
+}
+
+/* ---------- 分段控件 / 标签页 ---------- */
+.theme-admin .tabs {
+  display: flex;
+  gap: var(--sp-2);
+  margin-bottom: var(--sp-5);
+  border-bottom: 1px solid var(--line);
+}
+.theme-admin .tab {
+  position: relative;
+  padding: var(--sp-3) var(--sp-4);
+  font-size: var(--fs-sm);
+  color: var(--text-2);
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  transition: all var(--dur-1) var(--ease);
+}
+.theme-admin .tab:hover {
+  color: #fff;
+}
+.theme-admin .tab--on {
+  color: #fff;
+  font-weight: 600;
+  border-bottom-color: var(--gold-500);
+}
+
+/* ---------- 工具条 ---------- */
+.theme-admin .toolbar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 160px auto auto auto;
+  gap: var(--sp-3);
+  align-items: center;
+  margin-bottom: var(--sp-4);
+}
+/* 可点掉的筛选条件。做成按钮而不是纯文本，是因为"能点掉"这件事必须看得出来 */
+.theme-admin .chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  font-size: var(--fs-xs);
+  color: var(--gold-300);
+  background: rgba(192, 154, 78, 0.14);
+  border: 1px solid rgba(192, 154, 78, 0.4);
+  border-radius: 999px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.theme-admin .chip:hover {
+  background: rgba(192, 154, 78, 0.22);
+}
+@media (max-width: 860px) {
+  .theme-admin .toolbar {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+}
+
+/* ---------- 表单控件 ---------- */
+.theme-admin .field {
+  width: 100%;
+  padding: 7px 10px;
+  border-radius: var(--r-md);
+  border: 1px solid var(--line-strong);
+  background: rgba(11, 33, 25, 0.55);
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: var(--fs-sm);
+  transition: border-color var(--dur-1) var(--ease);
+}
+.theme-admin .field:focus {
+  outline: none;
+  border-color: var(--gold-500);
+}
+.theme-admin .field::placeholder {
+  color: var(--text-3);
+}
+.theme-admin .field--sm {
+  font-size: var(--fs-xs);
+  padding: 6px 9px;
+}
+.theme-admin .field--area {
+  resize: vertical;
+  line-height: 1.7;
+}
+.theme-admin select.field {
+  cursor: pointer;
+}
+/* 下拉选项在深色底上会变成系统默认的白底黑字，这里强制跟随主题 */
+.theme-admin select.field option {
+  background: #123026;
+  color: #eef3f0;
+}
+
+/* ---------- 字段组 ---------- */
+.theme-admin .fld {
+  display: block;
+}
+.theme-admin .fld__label {
+  display: block;
+  margin-bottom: 5px;
+  font-size: var(--fs-cap);
+  color: var(--text-2);
+}
+.theme-admin .fld__pair {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--sp-3);
+}
+.theme-admin .fld__triple {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--sp-3);
+}
+.theme-admin .fld__hint {
+  margin: -4px 0 0;
+  font-size: var(--fs-cap);
+  line-height: 1.7;
+  color: var(--text-3);
+}
+@media (max-width: 720px) {
+  .theme-admin .fld__pair,
+  .theme-admin .fld__triple {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* ---------- 表格 ---------- */
+.theme-admin .tablewrap {
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  background: rgba(18, 48, 38, 0.42);
+}
+.theme-admin .rt {
+  width: 100%;
+  min-width: 900px;
+  border-collapse: collapse;
+  font-size: var(--fs-sm);
+}
+.theme-admin .rt th {
+  text-align: left;
+  padding: var(--sp-3) var(--sp-4);
+  font-size: var(--fs-cap);
+  font-weight: 500;
+  color: var(--text-3);
+  border-bottom: 1px solid var(--line);
+  white-space: nowrap;
+}
+.theme-admin .rt td {
+  padding: var(--sp-3) var(--sp-4);
+  border-bottom: 1px solid var(--line);
+  vertical-align: middle;
+}
+.theme-admin .rt tbody tr:last-child td {
+  border-bottom: none;
+}
+.theme-admin .rt tbody tr:hover td {
+  background: rgba(146, 178, 165, 0.05);
+}
+/* 已下架的行压暗：一眼能从列表里分出"游客看不到的那些" */
+.theme-admin .rt__tr--off td {
+  opacity: 0.6;
+}
+.theme-admin .rt__name {
+  min-width: 220px;
+}
+.theme-admin .rt__title {
+  color: #fff;
+  font-weight: 600;
+}
+.theme-admin .rt__meta {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin-top: 4px;
+  font-size: var(--fs-cap);
+  color: var(--text-3);
+}
+.theme-admin .rt__meta code {
+  font-family: var(--font-mono, monospace);
+}
+.theme-admin .rt__ops {
+  white-space: nowrap;
+  text-align: right;
+}
+.theme-admin .rt__danger {
+  color: #e8a396;
+}
+.theme-admin .rt__danger:hover:not(:disabled) {
+  color: #ffd9d0;
+  border-color: rgba(168, 64, 43, 0.6);
+}
+
+/*
+ * ★ 无变体的 `.tag` 在深色管理端是「浅底浅字」，必须补一套配色。
+ *
+ * 根因：`.tag` 的基础配色来自游客端纸感调色板 —— `background: var(--paper-3)`
+ * （浅米色）+ `color: var(--ink-600)`（深灰）。管理端把 `--ink-600` 覆写成了
+ * 浅色（深色主题的正文色），但 `--paper-3` 仍是浅米色，于是两者相加就成了
+ * 「浅底浅字」。表现是资源表里「城市数据包 / 运营维护」那枚来源标签**看不清**。
+ *
+ * 只补无变体的那一类：`tag-brand` / `tag-gold` / `tag-tech` / `tag-warn`
+ * 用的是 `*-50` 浅底 + `*-700` 深字，本身就是「浅底深字」，在深色底上
+ * 是一枚有意的浅色胶囊，对比度成立 —— 不动它们，避免把"状态胶囊"也染黑。
+ */
+.theme-admin .tag:not([class*='tag-']) {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text-2);
+}
+
+/* 遮罩淡入淡出。抽屉/弹窗共用，所以单独一组，不复用 .notice 的过渡名 */
+.theme-admin .adm-fade-enter-active,
+.theme-admin .adm-fade-leave-active {
+  transition: opacity var(--dur-2) var(--ease);
+}
+.theme-admin .adm-fade-enter-from,
+.theme-admin .adm-fade-leave-to {
+  opacity: 0;
+}
+
+/* ---------- 抽屉（编辑优先 Drawer，不用整页跳转表单） ---------- */
+.theme-admin .drawer {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-modal, 60);
+  display: flex;
+  justify-content: flex-end;
+  background: rgba(4, 14, 10, 0.6);
+  backdrop-filter: blur(3px);
+}
+.theme-admin .drawer__box {
+  width: min(560px, 100%);
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid var(--line-strong);
+  background: #0e241c;
+  box-shadow: -24px 0 60px rgba(0, 0, 0, 0.45);
+  animation: adm-drawer-in var(--dur-2) var(--ease);
+}
+.theme-admin .drawer__box--wide {
+  width: min(760px, 100%);
+}
+@keyframes adm-drawer-in {
+  from {
+    transform: translateX(24px);
+    opacity: 0.4;
+  }
+  to {
+    transform: none;
+    opacity: 1;
+  }
+}
+.theme-admin .drawer__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-4);
+  padding: var(--sp-4) var(--sp-5);
+  border-bottom: 1px solid var(--line);
+}
+.theme-admin .drawer__head .h3 {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+}
+.theme-admin .drawer__body {
+  flex: 1;
+  min-height: 0;
+  padding: var(--sp-5);
+  overflow-y: auto;
+}
+.theme-admin .drawer__foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--sp-3);
+  padding: var(--sp-4) var(--sp-5);
+  border-top: 1px solid var(--line);
+}
+
+/* ---------- 对话框（沿用旧类名，探针依赖） ---------- */
+.theme-admin .modal {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-modal, 60);
+  display: grid;
+  place-items: center;
+  padding: var(--sp-5);
+  background: rgba(4, 14, 10, 0.66);
+  backdrop-filter: blur(3px);
+}
+.theme-admin .modal__box {
+  width: min(720px, 100%);
+  max-height: 86vh;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-lg);
+  background: #0e241c;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
+}
+.theme-admin .modal__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-4);
+  padding: var(--sp-4) var(--sp-5);
+  border-bottom: 1px solid var(--line);
+}
+.theme-admin .modal__head .h3 {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+}
+.theme-admin .modal__body {
+  padding: var(--sp-5);
+  overflow-y: auto;
+}
+.theme-admin .modal__foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--sp-3);
+  padding: var(--sp-4) var(--sp-5);
+  border-top: 1px solid var(--line);
+}
+
+/* ---------- 配图网格 ---------- */
+.theme-admin .hidden-file {
+  display: none;
+}
+.theme-admin .imgs {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: var(--sp-3);
+}
+.theme-admin .imgs__item {
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  overflow: hidden;
+  background: rgba(11, 33, 25, 0.5);
+}
+.theme-admin .imgs__item img {
+  display: block;
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  object-fit: cover;
+}
+.theme-admin .imgs__cap {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--sp-2) var(--sp-3) 0;
+  font-size: var(--fs-cap);
+  color: var(--text-3);
+}
+.theme-admin .imgs__ops {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: var(--sp-2) var(--sp-3) var(--sp-3);
+}
+.theme-admin .imgs__ops .btn {
+  padding: 3px 8px;
+  font-size: var(--fs-cap);
+}

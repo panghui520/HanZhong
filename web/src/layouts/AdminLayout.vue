@@ -1,14 +1,24 @@
 <script setup lang="ts">
 import { ref } from 'vue'
 
+/**
+ * 一级导航。**2026-10-04 起 7 项**（原来是 5 项：驾驶舱 / 资源管理 / 风险与工单 /
+ * 订单处理 / 图片管理）。
+ *
+ * 拆法的依据是"职责"而不是"表"：
+ *   · 原来的「资源管理」是一个 1574 行的大杂烩（景点 + 美食 + 农产品 + 评论四个 tab
+ *     挤在一页），既不像运营中心也不像管理工具。现在按**业务线**拆成四个页面，
+ *     每个页面自己完成"看数据 → 做管理"的闭环。
+ *   · 原来的「订单处理」降级为农产品管理里的一个 tab —— 订单是农产品这条业务线的
+ *     末端（发货 → 收货 → 售后），单独占一个一级入口会让"卖货"和"发货"分家。
+ */
 const menus = [
   { key: 'dashboard', label: '管理驾驶舱', to: '/admin/dashboard', icon: '◎' },
-  // M10 资源管理。三个入口（景点 / 美食 / 农产品）在页面内以标签页呈现，
-  // 而不是做成三个菜单项：现有菜单是扁平的，为它们加一层展开/收起
-  // 会动到整个侧栏的结构，而它们本来就是同一件事的三个视图。
-  { key: 'resources', label: '资源管理', to: '/admin/resources', icon: '◈' },
-  { key: 'risks', label: '风险与工单', to: '/admin/risks', icon: '⚠' },
-  { key: 'orders', label: '订单处理', to: '/admin/orders', icon: '⇄' },
+  { key: 'products', label: '农产品管理', to: '/admin/products', icon: '▣' },
+  { key: 'attractions', label: '乡村景点管理', to: '/admin/attractions', icon: '⛰' },
+  { key: 'restaurants', label: '餐饮管理', to: '/admin/restaurants', icon: '◍' },
+  { key: 'hotels', label: '住宿管理', to: '/admin/hotels', icon: '⌂' },
+  { key: 'risks', label: '风险工单管理', to: '/admin/risks', icon: '⚠' },
   { key: 'media', label: '图片管理', to: '/admin/media', icon: '▤' },
 ]
 

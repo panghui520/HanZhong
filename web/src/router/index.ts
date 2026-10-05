@@ -8,6 +8,15 @@ import { useSessionStore } from '@/stores/session'
  * 写在路由上而不是在守卫里逐个 path 判断 —— 新增页面时"要不要登录"
  * 和"路由长什么样"写在同一处，不会漏。
  */
+/**
+ * 重定向函数拿到的 `to`。
+ *
+ * 用**结构化的最小类型**而不是 vue-router 的 `RouteLocationNormalized`：
+ * 后者在不同小版本里叫法不同（`RouteLocationGeneric` / `RouteLocationNormalized`），
+ * 而这里只用到 `query` 一个字段。写最小需求，升级路由库时不会因为类型改名而红。
+ */
+type RedirectFrom = { query: Record<string, unknown> }
+
 const routes = [
   {
     path: '/',
@@ -106,12 +115,38 @@ const routes = [
       },
       {
         // M10 资源管理：景点 / 美食 / 农产品的列表、搜索、状态筛选与上下架维护。
-        // 三个入口做成页面内的标签页而不是三条路由 —— 它们共用同一套列表与表单
-        // （景点与美食在后端还是同一张 poi 表），拆成三条路由只会多两份重复代码，
-        // 而"改一处忘一处"在这里的后果是某个入口悄悄少一个字段。
+        //
+        // ★ 2026-10-04 起**不再是一级页面**：管理端按业务拆成了「乡村景点管理 /
+        //   餐饮管理 / 农产品管理 / 住宿管理」四个职责单一的页面，这条路由只作为
+        //   **兼容跳转**保留 —— 驾驶舱的旧链接、验收探针的期望值、答辩 PPT 的截图
+        //   都还写着 `/admin/resources?kind=...`，直接删掉会让它们无谓变红。
         path: 'resources',
-        name: 'admin-resources',
-        component: () => import('@/views/admin/Resources.vue'),
+        name: 'admin-resources-legacy',
+        redirect: (to: RedirectFrom) => legacyResourcesRedirect(to.query),
+      },
+      {
+        // 农产品管理：销售分析 + 商品管理 + 订单处理（订单不再是独立一级页面）
+        path: 'products',
+        name: 'admin-products',
+        component: () => import('@/views/admin/Products.vue'),
+      },
+      {
+        // 乡村景点管理：核心景区 + 乡村景点（页面内分段，不是两个一级菜单）
+        path: 'attractions',
+        name: 'admin-attractions',
+        component: () => import('@/views/admin/Attractions.vue'),
+      },
+      {
+        // 餐饮管理：餐饮资源分析 + 资源维护。**只有 6 个点**，不做 Top10
+        path: 'restaurants',
+        name: 'admin-restaurants',
+        component: () => import('@/views/admin/Restaurants.vue'),
+      },
+      {
+        // 住宿管理：住宿资源分析 + 资源维护。**只有 4 个点**
+        path: 'hotels',
+        name: 'admin-hotels',
+        component: () => import('@/views/admin/Hotels.vue'),
       },
       {
         // M9 图片管理：轮播图 + 每个景点的配图，上传/替换/删除/排序
@@ -126,15 +161,42 @@ const routes = [
         component: () => import('@/views/admin/Risks.vue'),
       },
       {
-        // M6 订单处理：待发货 → 已发货
+        // M6 订单处理。★ 2026-10-04 起并入「农产品管理」的一个 tab，不再是
+        // 一级导航。这条路由保留为兼容跳转（同上，旧链接要能用）。
         path: 'orders',
-        name: 'admin-orders',
-        component: () => import('@/views/admin/Orders.vue'),
+        name: 'admin-orders-legacy',
+        redirect: (to: RedirectFrom) => ({
+          path: '/admin/products',
+          query: { ...to.query, tab: 'orders' },
+        }),
       },
     ],
   },
   { path: '/:pathMatch(.*)*', redirect: '/' },
 ]
+
+/**
+ * 旧资源路由 → 新业务页。
+ *
+ * `?kind=` 的四个取值映射到四个页面；`btype=RURAL_SPOT`（驾驶舱「乡村到访占比」
+ * 卡曾经带的参数）翻译成景点页内部的 `seg=rural`。其余 query（`range` / `keyword` /
+ * `status`）原样带过去 —— **跨页传参按参数全集对齐**，漏一个就会出现
+ * "点进去筛选条件没了"这种静默不一致。
+ */
+function legacyResourcesRedirect(query: Record<string, unknown>) {
+  const q: Record<string, string> = {}
+  for (const [k, v] of Object.entries(query)) {
+    if (typeof v === 'string' && k !== 'kind' && k !== 'btype') q[k] = v
+  }
+  const kind = String(query.kind ?? 'scenic')
+  if (kind === 'food') return { path: '/admin/restaurants', query: q }
+  if (kind === 'product') return { path: '/admin/products', query: q }
+  // 评论管理现在**常驻**在景点页底部（评论只挂在 poi 上），
+  // 所以不需要再传一个 tab 参数 —— 传了也没人读，那是个被忽略的参数
+  if (kind === 'comment') return { path: '/admin/attractions', query: q }
+  if (String(query.btype ?? '') === 'RURAL_SPOT') return { path: '/admin/attractions', query: { ...q, seg: 'rural' } }
+  return { path: '/admin/attractions', query: q }
+}
 
 const router = createRouter({
   history: createWebHistory(),

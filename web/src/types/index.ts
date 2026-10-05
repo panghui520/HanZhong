@@ -1133,7 +1133,8 @@ export interface WorkOrder {
   risk_poi_name: string
   risk_stat_date: string
   title: string
-  type: RiskType
+  /** 规则的**动作类型**，不是风险类型 —— 见 `WorkOrderType` 的注释 */
+  type: WorkOrderType
   level: RiskLevel
   status: WorkOrderStatus
   assignee?: string
@@ -1145,10 +1146,108 @@ export interface WorkOrder {
 }
 
 /**
+ * 驾驶舱统计区间档位。与后端 `OpsService.snapshot(range)` 一一对应。
+ *
+ * 四个档位复用 M5 已有的**风险统计日口径**（基准日 = 数据包里最新的一天，
+ * 不是浏览器系统日期），不是新造的统计概念：
+ *   · `TODAY`  —— 基准日当天
+ *   · `LAST7`  —— 基准日往前 7 天（含当天）
+ *   · `LAST30` —— 基准日往前 30 天（含当天）
+ *   · `ALL`    —— 数据包覆盖的全部天数
+ */
+export type OpsRange = 'TODAY' | 'LAST7' | 'LAST30' | 'ALL'
+
+/**
+ * 管理端四大业务页面的业态短名。与后端 `OpsService.business(type, range)` 一一对应。
+ *
+ *   · `scenic`  —— 核心景区（`poi.business_type = SCENIC`，18 个点）
+ *   · `rural`   —— 乡村景点（`RURAL_SPOT`，12 个点）
+ *   · `food`    —— 餐饮（`FOOD`，**只有 6 个点**）
+ *   · `lodging` —— 住宿（`LODGING`，**只有 4 个点**）
+ *   · `product` —— 农产品（跨乡村产地聚合，不是 poi 业态）
+ *
+ * ★ 餐饮/住宿的点位数很少，"Top10"这种标题在这两个业态下是假的 —— 页面上
+ * 一律写"全部 N 家"，N 由数据长度决定。
+ */
+export type OpsBizType = 'scenic' | 'rural' | 'food' | 'lodging' | 'product'
+
+/** 业务页顶部的一个 KPI。标签与展示值都由**后端**给，前端不再加工 —— 两边各拼一次就会漂移 */
+export interface OpsBusinessKpi {
+  key: string
+  /** 带周期前缀（"近 7 日到访"），跟着 range 走 */
+  label: string
+  /** 已格式化的展示值（含千分位 / ¥ / %） */
+  value: string
+  unit: string
+}
+
+/** 排行 / 分布的一行 */
+export interface OpsBusinessRow {
+  id?: string
+  name: string
+  /** 次级说明：区县 / 分类 / 档位 */
+  sub?: string
+  value: number
+}
+
+/** 业务页趋势上的一天 */
+export interface OpsBusinessPoint {
+  date: string
+  date_iso: string
+  visitors: number
+  purchases: number
+  repurchases: number
+  sales: number
+}
+
+/** 冷热散点上的一个点（仅景区 / 乡村有） */
+export interface OpsBusinessScatter {
+  id: string
+  name: string
+  district?: string
+  /** 窗口内到访人次 */
+  x: number
+  /** 窗口平均承载率，0–1 */
+  y: number
+  size: number
+}
+
+/**
+ * 单业态运营分析。
+ *
+ * **与 `OpsSnapshot` 同一套算法**（后端复用同一批 `sumWindow` / `avgUsageByPoi` /
+ * `avgPriceByPoi`），所以驾驶舱的销售额与农产品页的销售额**必然相等** ——
+ * 对不上就是 bug，不是"口径不同"。
+ *
+ * **全部来自仿真数据**（`poi_visit_stats`，synthetic=1），不混真实订单。
+ */
+export interface OpsBusiness {
+  synthetic: boolean
+  type: OpsBizType
+  range: OpsRange
+  range_from: string
+  range_to: string
+  period_label: string
+  kpis: OpsBusinessKpi[]
+  /** 排行。景区/餐饮/住宿是"每个资源点"，农产品是"每个产地" */
+  top: OpsBusinessRow[]
+  /** 逐日趋势。**点数下限 7**（与驾驶舱同一约定） */
+  trend: OpsBusinessPoint[]
+  districts: OpsBusinessRow[]
+  scatter: OpsBusinessScatter[]
+  /** 构成分布：承载档（景区/餐饮/住宿）或产品分类（农产品） */
+  distribution: OpsBusinessRow[]
+}
+
+/**
  * 运营快照（管理端大屏）。
  *
  * **全部来自仿真数据**，`synthetic` 恒为 true，界面上要标出来。
  * 真实订单在运营端「订单处理」页看，不混进这块屏。
+ *
+ * **2026-10-04 起全屏统一为一个统计区间**（`range`）：此前是"客流当日 +
+ * 消费近 7 日"的混合口径，`period_label` 得逐个交代。现在所有指标同窗口，
+ * 唯一例外是趋势图点数下限 7 天（见 `trend` 的注释）。
  *
  * `rural_sales_top` 是**乡村点级**销售额排行，不是产品级 ——
  * 合成数据只支持到乡村点（见 OpsService 的口径说明）。
@@ -1157,35 +1256,55 @@ export interface WorkOrder {
  */
 export interface OpsSnapshot {
   /**
-   * 数据周期说明。**直接显示这个字符串**，不要前端自己拼一句话。
-   * 它同时说明了"哪些数是当日、哪些是近 7 日"—— 这块屏上两类混在一起。
+   * 数据周期说明。**直接显示这个字符串**，不要前端自己拼一句话 ——
+   * 前端拼会与后端实际用的窗口漂移，而"屏幕上的数字变了、说明没变"
+   * 这种不一致不会报错，只会一直错下去。
    */
   period_label: string
   synthetic: boolean
 
+  /** 统计区间档位（后端回显）。前端据此确认"我选的档"与"后端算的档"一致 */
+  range: OpsRange
+  /** 统计区间起始（含），yyyy-MM-dd */
+  range_from: string
+  /** 统计区间结束（含），yyyy-MM-dd */
+  range_to: string
+
   /**
-   * 当日**核心景区**到访人次。
+   * 区间内**核心景区**到访人次（窗口 = `range`，见上）。
    * 不含乡村/餐饮/住宿/交通，也不是独立游客数（是人次）。
-   * 标签上必须写清，不要写成"全市到访"。
+   * 标签上必须写清周期，不要写成"全市到访"。
    */
   total_visitors: number
-  /** 当日乡村点到访人次 */
+  /** 区间内乡村点到访人次，与 total_visitors 同口径 */
   rural_visitors: number
   /** 乡村占"核心景区 + 乡村"的比例，0–1。**不是**乡村占全市到访的比例 */
   rural_ratio: number
-  /** 近 7 日农产品销售额 */
+  /** 区间内农产品销售额。**乡村点级**：产地关联产品均价 × 购买笔数，不是单品级 */
   product_sales: number
-  /** 近 7 日离境复购率，0–1 */
+  /**
+   * 区间内**乡村复购率**，0–1 = 复购笔数 / 购买笔数。
+   *
+   * ★ 这是**笔数比**，不是"用户级复购率"：统计表是"资源点 × 天"的汇总，
+   * 没有用户身份维度，用户级复购率在当前数据模型下算不出来。
+   * 界面上固定称"乡村复购率"，**不要写成"离境复购率"**（那会读成用户留存率）。
+   */
   repurchase_rate: number
-  /** 当前未闭环的风险事件数 */
+  /** 区间内未闭环的风险事件数（与 `range_from`/`range_to` 同轴） */
   open_risks: number
 
-  /** 近 7 日趋势。`date` 是"周一"这类星期名，直接当横轴标签 */
-  trend: { date: string; visitors: number; usage: number }[]
-  /** 当日到访的业态构成 */
+  /**
+   * 趋势。**点数下限 7 天**：选"今日"时若只画一根柱子看不出走势，
+   * 所以这一张图的窗口是 `max(range, 7 天)`。`date` 在 7 天内是"周一"
+   * 这类星期名，更长则是 `MM-dd`（60 天里会出现 8 个"周一"，没有区分度）。
+   * `date_iso` 才是这一天的**身份**（点柱子查风险数用它，不用 `date`）。
+   */
+  trend: { date: string; date_iso: string; visitors: number; usage: number }[]
+  /** 区间内到访的业态构成 */
   mix: { name: string; value: number }[]
-  /** 按区县的冷热对比，单位是百分比数值（88 表示 88%） */
+  /** 按区县的冷热对比，单位是百分比数值（88 表示 88%）。窗口内的平均承载 */
   imbalance: { name: string; scenic: number; rural: number }[]
+  /** 乡村点销售额排行（区间内） */
   rural_sales_top: { name: string; sales: number }[]
 
   /** 大屏右侧只展示这几条，已按"等级优先 + 类型多样"挑过 */
@@ -1215,6 +1334,25 @@ export const RISK_TYPE_LABEL: Record<string, string> = {
   REVIEW: '差评激增',
   HEAT: '热度跳变',
   REPURCHASE: '复购衰减',
+}
+
+/**
+ * 工单类型。键是 `risk_rule.action_type`，与后端 `WorkOrder.TYPE_*` 一一对应。
+ *
+ * ★ **不是** `RiskType`。踩过一次：`WorkOrder.type` 存的是规则的**动作类型**
+ *   （后端 `RuleEngine.workOrderType` 直接返回 `rule.getActionType()`），
+ *   但这里曾把它声明成 `RiskType`，界面又用 `RISK_TYPE_LABEL` 去查 ——
+ *   两套键对不上，`?? w.type` 兜底于是把 `DIVERSION` / `MONITOR` 这种
+ *   给机器看的字符串直接显示在中文界面上。
+ */
+export type WorkOrderType = 'DIVERSION' | 'EXPOSURE' | 'SERVICE' | 'MONITOR'
+
+/** 工单类型中文标签。四个动作类型全覆盖 */
+export const ACTION_TYPE_LABEL: Record<string, string> = {
+  DIVERSION: '分流引导',
+  EXPOSURE: '曝光调整',
+  SERVICE: '服务整改',
+  MONITOR: '持续监控',
 }
 
 /** 风险状态中文标签 */

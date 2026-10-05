@@ -3,6 +3,7 @@ import type {
   AgentHandlers,
   AiHealth,
   OpsAnalysis,
+  OpsRange,
   QaEvent,
   QaHandlers,
 } from '@/types'
@@ -53,13 +54,18 @@ export function getSuggestions() {
  * 该让页面显示错误；而"模型没解读出来"不是错误 —— 后端会正常返回 200，
  * 只是 `mode` 为 `unavailable`、`sections` 为空。两者别混。
  *
+ * **`range` 必须跟着驾驶舱顶部档位一起传**：后端拿它去取同一份快照。
+ * 不传的话，切到"近 30 天"时 KPI 卡是 30 天的数、AI 解读却讲今日的数 ——
+ * 同一屏上两个口径，且不报错。详见 OpsAdminController#analyzeOps。
+ *
  * @param focus 解读维度。取值见 `OPS_FOCUSES`，后端与 Python 各有白名单校验
+ * @param range 统计区间。与 `/ops/snapshot` 同参；不传则后端按"今日"
  */
-export function analyzeOps(focus: string) {
+export function analyzeOps(focus: string, range?: OpsRange) {
   return request<OpsAnalysis>('/admin/ops/analyze', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ focus }),
+    body: JSON.stringify({ focus, range }),
   })
 }
 

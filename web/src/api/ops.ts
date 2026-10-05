@@ -1,4 +1,7 @@
 import type {
+  OpsBizType,
+  OpsBusiness,
+  OpsRange,
   OpsSnapshot,
   PoiStat,
   RiskEvent,
@@ -34,9 +37,31 @@ export function getPoiStats() {
 
 // ------------------------------------------------- 运营端（需要 OPERATOR）
 
-/** 运营大屏快照。字段见 OpsSnapshot 的注释，全部为仿真数据 */
-export function getOpsSnapshot() {
-  return request<OpsSnapshot>('/admin/ops/snapshot')
+/**
+ * 运营大屏快照。字段见 OpsSnapshot 的注释，全部为仿真数据。
+ *
+ * `range` 是驾驶舱顶部日期控件的档位：`TODAY`（默认）/ `LAST7` / `ALL`。
+ * 不传 = 后端按 `TODAY` 算 —— 这个参数加上之前的行为，不是新接口：
+ * 窗口化的取数与原 `snapshot()` 是同一份逻辑（都走 `sumWindow`）。
+ */
+export function getOpsSnapshot(range?: OpsRange) {
+  const q = range ? `?range=${range}` : ''
+  return request<OpsSnapshot>(`/admin/ops/snapshot${q}`)
+}
+
+/**
+ * 单业态运营分析（管理端四大业务页面）。
+ *
+ * 与 `getOpsSnapshot` **是同一套算法**：后端复用同一批窗口求和与承载均值函数，
+ * 所以驾驶舱的销售额与农产品页的销售额必然相等。
+ *
+ * `range` 从驾驶舱下钻时原样带过来（见 `Dashboard.vue` 的 `to`），
+ * 保证"切到近 30 日后点进去，业务页也是近 30 日"。
+ */
+export function getOpsBusiness(type: OpsBizType, range?: OpsRange) {
+  const q = new URLSearchParams({ type })
+  if (range) q.set('range', range)
+  return request<OpsBusiness>(`/admin/ops/business?${q.toString()}`)
 }
 
 /**
