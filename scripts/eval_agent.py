@@ -54,6 +54,7 @@ from app.tools import (  # noqa: E402
     TOOL_NONE,
     TOOL_PLAN,
     TOOL_POI,
+    TOOL_ROUTE,
     TOOL_SPECS,
     _infer_types,
     available_tools,
@@ -84,8 +85,12 @@ def main() -> int:
         "有工具缺 title 或 args_hint（会渲染出空行给模型看）",
     )
     needs_amap = {spec.name for spec in TOOL_SPECS if spec.needs_amap}
+    # ★ 2026-09-28 补 `TOOL_ROUTE`：`get_route`（两点驾车）加进来时带了
+    #   `needs_amap=True`，但这张期望表没跟着改 —— 于是这条断言从那天起一直是红的，
+    #   而它红得"安静"（没有 CI，只有人手动跑）。漏在这里的代价很实际：
+    #   它同时意味着"高德没配时把 get_route 列给模型"这类错不会被发现。
     check(
-        needs_amap == {TOOL_NEARBY, TOOL_POI},
+        needs_amap == {TOOL_NEARBY, TOOL_POI, TOOL_ROUTE},
         f"needs_amap 标记不对：{needs_amap}",
     )
     print(f"    工具 {len(TOOL_SPECS)} 个：{'、'.join(names)}")
@@ -104,7 +109,7 @@ def main() -> int:
     # 那句"未配置高德地图"的说明里本来就会提到那两个工具名，
     # 用子串匹配会被自己写的说明误命中。
     check(
-        set(names_on) == {TOOL_NEARBY, TOOL_POI, TOOL_KNOWLEDGE, TOOL_PLAN},
+        set(names_on) == {TOOL_NEARBY, TOOL_POI, TOOL_ROUTE, TOOL_KNOWLEDGE, TOOL_PLAN},
         f"amap 已配时的可用工具不对：{names_on}",
     )
     # 高德没配时剩下的**不是只有知识库**：行程规划读本地数据包，不需要联网，
@@ -135,7 +140,7 @@ def main() -> int:
     )
     # `{city}` 占位符必须已经被替换掉：漏替换的表现是模型读到字面的"{city}"。
     check("{city}" not in menu_on and "汉中" in menu_on, "工具清单里的 {city} 占位符没被替换")
-    print("    amap 开：4 工具 + 类型码；amap 关：知识库 + 行程规划 + 原因说明")
+    print("    amap 开：5 工具 + 类型码；amap 关：知识库 + 行程规划 + 原因说明")
 
     # ------------------------------------------------------------------
     # 3. 调度器输出解析（脏输出宽容度）
@@ -586,13 +591,28 @@ def main() -> int:
         any("附近" in q for q in flat_on),
         "高德可用时应该给出「附近…」这类示例",
     )
+    # ★ 2026-09-28：这两条原来断言 `any("知识库" in g["title"])` / `any("行程" in g["title"])` ——
+    #   把**展示文案**当成了契约。游客端口径复查时把标题从"查本地知识库（有出处的公开资料）"
+    #   改成"汉中的来历与风物（都有出处）"，断言立刻变红，而功能一行没动。
+    #   文案本来就该随口径改（这次就是专门去改它），所以锚点不能放在标题上。
+    #
+    #   换成按**结构**断言：每组都有标题且不为空、三组之间没有抄同一批问题、
+    #   「附近」类正好占一组（它由高德能力决定，是这一段真正要守的东西）。
+    #   "三组都在"由上面的 `len(groups_on) == 3` 与下面的 `len(groups_off) == 2` 兜住 ——
+    #   所以这里**不是把断言改松**，是把"盯着文案"换成"盯着结构"。
+    nearby_groups = [g for g in groups_on if any("附近" in q for q in g["items"])]
     check(
-        any("知识库" in g["title"] for g in groups_on),
-        "示例里缺少知识库那一组",
+        len(nearby_groups) == 1,
+        f"「附近」类示例应正好占一组，实际 {len(nearby_groups)} 组",
     )
     check(
-        any("行程" in g["title"] for g in groups_on),
-        "示例里缺少行程那一组",
+        all(g["title"].strip() and g["items"] for g in groups_on),
+        f"有分组缺标题或没有示例问题：{[g['title'] for g in groups_on]}",
+    )
+    item_sets = [tuple(g["items"]) for g in groups_on]
+    check(
+        len(set(item_sets)) == len(item_sets),
+        f"有两个分组给了同一批示例问题：{item_sets}",
     )
 
     svc_off = AgentService(_StubSettings(), None, None)
@@ -609,7 +629,7 @@ def main() -> int:
         "高德不可用时把行程示例也藏起来了（它不需要高德）",
     )
 
-    print("    高德可用 3 组（含附近类）；不可用 2 组（行程组不受影响），不含附近类")
+    print("    高德可用 3 组（含附近类，正好占一组）；不可用 2 组（行程组不受影响），不含附近类")
 
     # ------------------------------------------------------------------
     # 9. 配置：留空 = 用默认值
@@ -1259,6 +1279,101 @@ def main() -> int:
         "    每天只排一个区县、点不重复、不超预算；起点随住处；"
         "天数有兜底与上限；数据包缺失时报错而非空行程"
     )
+
+    # ------------------------------------------------------------------
+    # 16. 工具失败文案的**游客口径**
+    #
+    # `ToolResult.error` 是**诊断**口径：它进模型提示词（`agent._generate` 的
+    # "本次工具没有取到数据（{error}）"），也被 `accept_m4_route.py` 断言
+    # （G4 明确要求里面透出 infocode）。所以它**可以**带厂商名、错误码、内部工具名。
+    #
+    # 但它曾经**原样渲染在游客端**（`Agent.vue` 的 `{{ t.tool.error }}`）——
+    # 于是游客会看到"高德查询失败：高德返回错误 10001: INVALID_USER_KEY"
+    # 和"本机未配置高德地图（AMAP_KEY）"。解法是拆成两条：
+    # `error` 留诊断，`user_error` 给游客，前端取 `user_error or error`。
+    #
+    # 规矩：**凡是 error 里带了实现口径的，必须同时给出 user_error；
+    # 且 user_error 自己一个都不许带。**
+    #
+    # 为什么这条要写成断言：2026-09-28 那次游客端口径复查**就是漏在这里**的 ——
+    # 渲染级探针只看得见"页面上已经渲染出来的字"，而这些文案只在**失败路径**出现，
+    # 探针永远跑不到。范围类要求要按**入口清单**验，不能按"我想到的那个页面"验。
+    #
+    # 做法是**静态扫源码**（ast）而不是构造调用：这样连"以后新增的失败分支"
+    # 也一起管住，而且不依赖能不能把这个分支构造出来。
+    # ------------------------------------------------------------------
+    print("【16】工具失败文案的游客口径")
+
+    import ast  # noqa: E402
+
+    # 这些词是**实现口径**：厂商名、环境变量名、内部工具名、实现名词。
+    BANNED_IN_USER_TEXT = (
+        "高德",
+        "AMAP_KEY",
+        "LLM_API_KEY",
+        "INTERNAL_TOKEN",
+        "search_poi",
+        "search_nearby",
+        "knowledge_search",
+        "plan_itinerary",
+        "get_route",
+        "数据包",
+        "infocode",
+        "INVALID_USER_KEY",
+    )
+
+    def _literal_parts(node: object) -> str:
+        """取字符串字面量（含 f-string 里的固定片段）的文本，供禁用词扫描。
+
+        只取**固定片段**：`f"高德查询失败：{exc}"` 里能扫到的是"高德查询失败："。
+        插值部分（`exc`）扫不到 —— 那正是要的：它是运行时的诊断内容，
+        本来就不该出现在游客文案里，所以它只可能出现在 `error` 上。
+        """
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return node.value
+        if isinstance(node, ast.JoinedStr):
+            return "".join(
+                v.value
+                for v in node.values
+                if isinstance(v, ast.Constant) and isinstance(v.value, str)
+            )
+        return ""
+
+    tools_src = Path(__file__).resolve().parents[1] / "server-ai" / "app" / "tools.py"
+    tree = ast.parse(tools_src.read_text(encoding="utf-8"))
+
+    def _tool_result_calls(node: ast.AST):
+        for sub in ast.walk(node):
+            if isinstance(sub, ast.Call) and getattr(sub.func, "id", "") == "ToolResult":
+                yield sub
+
+    needs_user_error = 0
+    for call in _tool_result_calls(tree):
+        kw = {k.arg: k.value for k in call.keywords if k.arg}
+        err_text = _literal_parts(kw["error"]) if "error" in kw else ""
+        hits = [w for w in BANNED_IN_USER_TEXT if w in err_text]
+        if not hits:
+            continue
+        needs_user_error += 1
+        user_text = _literal_parts(kw["user_error"]) if "user_error" in kw else ""
+        check(
+            "user_error" in kw,
+            f"tools.py:{call.lineno} 的 error 带了实现口径 {hits} 却没有 user_error"
+            " —— 这一条会原样渲染到游客端",
+        )
+        check(
+            not [w for w in BANNED_IN_USER_TEXT if w in user_text],
+            f"tools.py:{call.lineno} 的 user_error 自己带了实现口径：{user_text!r}",
+        )
+    # ★ 让这条扫描**证明自己的覆盖面**：断言形状写错（比如函数名改了）会扫到 0 条，
+    #   而"0 条都不违规"是平凡为真的 —— 那比没有断言更糟。
+    check(
+        needs_user_error >= 10,
+        f"只扫到 {needs_user_error} 条需要 user_error 的失败文案 —— 扫描本身可能失效了",
+    )
+    # 这句**只报数，不报结论** —— 结论由上面两条 check 给。写成"全部干净"的话，
+    # 一旦某条 check 失败，这句会跟着打出一句相反的话（反向对照时实测过）。
+    print(f"    扫到 {needs_user_error} 条带诊断口径的失败文案（每条都必须另有游客口径）")
 
     # ------------------------------------------------------------------
     print()

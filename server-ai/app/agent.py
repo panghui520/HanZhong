@@ -295,7 +295,14 @@ class AgentService:
                 "label": result.label or self._label(name, args, context),
                 "count": result.count,
                 "elapsed_ms": int((time.monotonic() - tool_started) * 1000),
-                "error": result.error,
+                # ★ 2026-09-28（游客端口径复查）：这一条**原样渲染在游客端**
+                #   （`Agent.vue` 的 `{{ t.tool.error }}`）。而 `result.error` 是
+                #   给模型与验收脚本用的**诊断**口径 —— 里面会有"高德查询失败：
+                #   INVALID_USER_KEY""未配置高德地图（AMAP_KEY）"这类厂商名与
+                #   环境变量名。所以这里优先取 `user_error`（为空才回落 `error`，
+                #   说明那条本来就写得足够通俗）。下面 `_generate` 里给模型的
+                #   仍然是 `result.error`，诊断能力一点没少。
+                "error": result.user_error or result.error,
             }
             # 卡片直接从工具结果来，**不经过模型**（见 tools.py 的模块 docstring）
             if result.cards:

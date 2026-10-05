@@ -1,12 +1,15 @@
 <script setup lang="ts">
 /**
- * Itinerary —— AI 智能行程规划工作台
+ * Itinerary —— 行程规划工具（**纯前端规则，不调用 AI**）
  *
- * 本页是首页「AI 智能行程规划」区块的落地页。
+ * 本页是首页「智能行程规划」区块里"想自己动手排"那个**次级入口**的落地页；
+ * 主入口指向 /agent —— 那条路才真的调模型（见 Home.vue 里 D1 那段注释）。
  *
- * **当前仍是纯前端规则演示，不调用后端接口。** M4（多智能体行程规划）接入时，
+ * **当前仍是纯前端规则演示，不调用后端接口，也没有任何模型调用。** M4（多智能体行程规划）接入时，
  * 把 `plan` 这个 computed 换成一次接口调用即可 —— 它已经是一个
  * "入参 → { days, summary, picks }" 的纯函数式映射，UI 不需要改。
+ * ★ 正因为它一次模型都不调，页面文案**一律不出现"AI / 自动规划"**，
+ *   定位就是"行程规划工具 / 行程安排"（见 banner 的 eyebrow）。
  *
  * 之所以把规则写得这么显式（而不是随机拼几条），是因为答辩要能讲清
  * "判定与生成是分开的"：
@@ -356,7 +359,9 @@ useReveal(
       <SceneArt variant="terrace" ratio="auto" class="banner__art" />
       <div class="banner__veil" />
       <div class="container banner__inner">
-        <span class="eyebrow eyebrow--light">智能行程规划</span>
+        <!-- ★ 不写"智能/AI 行程规划"：本页是纯规则计算，一次模型都不调。
+             定位成"工具"，与真实能力一致（见文件头注释）。 -->
+        <span class="eyebrow eyebrow--light">行程规划工具</span>
         <h1 class="display banner__title">让每一段汉中旅程<br />都恰到好处</h1>
         <p class="banner__desc">
           告诉我出行天数、同行人数和偏好，我帮你把景点、美食、住宿与乡村体验排成一条能照着走的动线 ——

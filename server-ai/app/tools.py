@@ -186,7 +186,20 @@ class ToolResult:
     label: str = ""
     # 非空表示这次没拿到数据。**不是异常**：上层照常让模型说话，
     # 只是把这句话交给它，让它如实告诉用户。
+    #
+    # ★ 2026-09-28（游客端口径复查）：这个字段**同时服务两个受众** ——
+    #   ① 进模型的提示词（`agent._generate`：`本次工具没有取到数据（{error}）`）；
+    #   ② 原样渲染在游客端（`Agent.vue` 的工具轨迹：`{{ t.tool.error }}`）。
+    #   于是它必须同时满足"诊断要准"和"游客要看得懂"，这两个要求会打架：
+    #   `高德查询失败：高德返回错误 10001: INVALID_USER_KEY` 对模型是好信息，
+    #   对游客是纯噪音 —— 它还带着厂商名与错误码。
+    #   解法不是把它改简单（`accept_m4_route.py` G4 明确要求 error 里透出 infocode，
+    #   那是刻意的诊断能力），而是**把两个受众拆开**：
+    #   `error` 保持诊断原样（模型 + 测试用），`user_error` 放给游客看的那句话。
+    #   为空时前端回落到 `error` —— 所以只有"确实不适合给游客看"的那几条需要填。
     error: str = ""
+    # 给游客看的一句话。空 = 直接显示 `error`（说明它本来就写得足够通俗）。
+    user_error: str = ""
     # knowledge_search 的原始命中。给 agent 复用 M3 的 `build_messages` 用 ——
     # 那套提示词要的是 Hit 列表而不是拼好的文本，所以这里把原文一并带出来，
     # 避免"为了走 M3 的提示词再检索一次"。
@@ -465,6 +478,7 @@ def _search_nearby(
                 kind="poi",
                 label=f"正在搜索{center_name or city_name}附近…",
                 error=f"没能确定搜索中心点（「{center_name or '未指定'}」查不到，且数据包里没有城市中心坐标）",
+                user_error=f"没能确定从哪儿开始找（「{center_name or '未指定'}」查不到）",
             )
         location = f"{city_center[0]:.6f},{city_center[1]:.6f}"
         center_label = f"{city_name}市区中心"
@@ -480,7 +494,13 @@ def _search_nearby(
         )
     except AmapError as exc:
         logger.warning("[工具] 周边搜索失败：%s", exc)
-        return ToolResult(name=TOOL_NEARBY, kind="poi", label=label, error=f"高德查询失败：{exc}")
+        return ToolResult(
+            name=TOOL_NEARBY,
+            kind="poi",
+            label=label,
+            error=f"高德查询失败：{exc}",
+            user_error="查真实地点暂时没成功，稍后再试或换个说法",
+        )
 
     if not pois:
         what = TYPE_LABELS.get(types, keyword or "地点")
@@ -521,7 +541,10 @@ def _search_poi(args: dict[str, Any], *, amap, city_name: str) -> ToolResult:
     types = str(args.get("types") or "").strip()
     if not keywords and not types:
         return ToolResult(
-            name=TOOL_POI, kind="poi", error="search_poi 需要 keywords 或 types 至少一个"
+            name=TOOL_POI,
+            kind="poi",
+            error="search_poi 需要 keywords 或 types 至少一个",
+            user_error="这次没查成，换个说法再试试",
         )
 
     label = f"正在搜索「{keywords or types}」…"
@@ -529,7 +552,13 @@ def _search_poi(args: dict[str, Any], *, amap, city_name: str) -> ToolResult:
         pois = amap.search_text(keywords, types=types, city=city_name, offset=10)
     except AmapError as exc:
         logger.warning("[工具] 地点搜索失败：%s", exc)
-        return ToolResult(name=TOOL_POI, kind="poi", label=label, error=f"高德查询失败：{exc}")
+        return ToolResult(
+            name=TOOL_POI,
+            kind="poi",
+            label=label,
+            error=f"高德查询失败：{exc}",
+            user_error="查真实地点暂时没成功，稍后再试或换个说法",
+        )
 
     if not pois:
         return ToolResult(
@@ -567,7 +596,12 @@ def _search_poi(args: dict[str, Any], *, amap, city_name: str) -> ToolResult:
 def _knowledge_search(args: dict[str, Any], *, store: KbStore, top_k: int) -> ToolResult:
     query = str(args.get("query") or args.get("keywords") or "").strip()
     if not query:
-        return ToolResult(name=TOOL_KNOWLEDGE, kind="knowledge", error="knowledge_search 需要 query")
+        return ToolResult(
+            name=TOOL_KNOWLEDGE,
+            kind="knowledge",
+            error="knowledge_search 需要 query",
+            user_error="这次没查成，换个问题再试试",
+        )
 
     # ★ 这一句会**原样显示在游客端的工具轨迹里**（Agent.vue 的 .tstep__label）。
     #   原来写的是"正在检索本地知识库…" —— "本地知识库"是我们的实现口径，
@@ -644,6 +678,7 @@ def _plan_itinerary(
             kind="itinerary",
             label=label,
             error="数据包里没有可用的游览点数据，排不了行程",
+            user_error="目前没有可用的游览点数据，排不了行程",
         )
 
     hotel = hotel or {}
@@ -709,6 +744,7 @@ def _get_route(
             name=TOOL_ROUTE,
             kind="route",
             error="get_route 需要 from 与 to 两个地名都不能为空",
+            user_error="算路线需要「从哪儿」和「到哪儿」两个地名",
         )
 
     label = f"正在算「{from_name}」到「{to_name}」的驾车路线…"
@@ -759,6 +795,7 @@ def _get_route(
             kind="route",
             label=label,
             error=f"这些地名高德数据库里没找到坐标：{', '.join(missing)}（换个更具体的写法试试）",
+            user_error=f"这些地名没找到：{', '.join(missing)}（换个更具体的写法试试）",
         )
 
     # 用 `GeoPoint.location`（`"lng,lat"`，六位小数）而不是自己拼 ——
@@ -773,6 +810,7 @@ def _get_route(
             kind="route",
             label=label,
             error=f"高德路径规划失败：{exc}",
+            user_error="路线暂时算不出来，稍后再试",
         )
     if info is None:
         # 少见分支：高德 status=1 但 route.paths 为空。
@@ -783,6 +821,7 @@ def _get_route(
             kind="route",
             label=label,
             error="高德返回了空结果（这条起终点之间没有规划出驾车路线）",
+            user_error="这两个地方之间没有规划出驾车路线",
         )
 
     distance_km = info["distance_m"] / 1000.0
@@ -864,6 +903,7 @@ def execute(
                 name=name,
                 kind="poi",
                 error="本机未配置高德地图（AMAP_KEY），查不到真实地点数据",
+                user_error="当前没有开通查真实地点的能力",
             )
         if name == TOOL_NEARBY:
             return _search_nearby(
@@ -882,9 +922,13 @@ def execute(
                 name=TOOL_ROUTE,
                 kind="route",
                 error="本机未配置高德地图（AMAP_KEY），算不了真实路线",
+                user_error="当前没有开通算真实路线的能力",
             )
         return _get_route(args, amap=amap, resolver=resolver, city_name=city_name)
 
     return ToolResult(
-        name=name, kind="none", error=f"没有名为「{name}」的工具"
+        name=name,
+        kind="none",
+        error=f"没有名为「{name}」的工具",
+        user_error="这个能力暂时不可用",
     )

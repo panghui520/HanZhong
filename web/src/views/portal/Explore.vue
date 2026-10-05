@@ -120,14 +120,28 @@ const cats = computed(() =>
 
 /** 初始类别：URL 里给了合法值就用它，否则默认「景点」——多数人来汉中就是看景点 */
 const VALID_TYPES = new Set<string>(BUSINESS_ORDER)
+/** 默认类别。URL 里没写 `type` 时，实际生效的就是它（写 URL 时也拿它当比较基准） */
+const DEFAULT_TYPE: BusinessType = 'SCENIC'
 function initialType(): BusinessType {
   const q = route.query.type
-  return typeof q === 'string' && VALID_TYPES.has(q) ? (q as BusinessType) : 'SCENIC'
+  return typeof q === 'string' && VALID_TYPES.has(q) ? (q as BusinessType) : DEFAULT_TYPE
+}
+
+/**
+ * 初始关键词：与 initialType 同构，从 URL 读。
+ *
+ * 首页搜索框跳的是 `/explore?keyword=…`（HeroCarousel.search）。本页若只读
+ * `type` 不读 `keyword`，用户搜完落地看到的就是**未筛选的全量列表** ——
+ * 搜了等于没搜。所以初值必须从 URL 来。
+ */
+function initialKeyword(): string {
+  const q = route.query.keyword
+  return typeof q === 'string' ? q : ''
 }
 
 const activeType = ref<BusinessType>(initialType())
 const activeTheme = ref<ThemeKey | 'ALL'>('ALL')
-const keyword = ref('')
+const keyword = ref(initialKeyword())
 const district = ref<string>('')
 
 /** 当前类别下的全部资源（未做二级/三级筛选） */
@@ -272,8 +286,8 @@ function clearSubFilters() {
 function pickType(t: BusinessType) {
   if (activeType.value === t) return
   activeType.value = t
-  // 类别进 URL：刷新后还在这一类，链接也能直接分享
-  void router.replace({ query: { ...route.query, type: t } })
+  // 类别进 URL 由下面那个**唯一写入口**统一处理（见 syncUrlWatch 的注释）——
+  // 这里不要再自己 replace 一次，否则会和"清关键词"那次互相覆盖。
   scrollToGrid()
 }
 
@@ -283,6 +297,62 @@ function pickType(t: BusinessType) {
  * 而实际上只是筛选条件互相矛盾。
  */
 watch(activeType, clearSubFilters)
+
+/**
+ * 类别与关键词 → URL 的**唯一写入口**。
+ *
+ * 为什么关键词要进 URL（而不是只留一个本地 ref）：
+ *   - 只读不写 → 用户在本页手输的关键词刷新就丢，链接也分享不出去；
+ *   - 只写不读 → 清空输入框后 URL 里还留着旧关键词，刷新它又回来了，看着像"清不掉"。
+ *
+ * ★ 为什么必须**只有一个**写入口：若 `pickType` 与关键词 watch 各写一次 URL，
+ *   后一次是拿"调用瞬间的 `route.query`"去合并的 —— 而前一次导航还没提交，
+ *   `route.query` 仍是旧值，于是把前一次刚写进去的 `type` 抹掉。
+ *   （实测：点类别后 URL 变成空 query，类别筛选也跟着丢。）
+ *   所以这里把两者合成一个 watch，一次写全。
+ *
+ * ★ 为什么用 `effCurType` 而不是直接比 `route.query.type`：URL 里没写 `type` 时，
+ *   实际生效的是默认类别。直接比会认为"不一样"，于是 `/explore` 一进来就被写成
+ *   `/explore?type=SCENIC` —— 地址栏凭空多一个参数。
+ */
+watch(
+  () => `${activeType.value}|${keyword.value}`,
+  () => {
+    const curType = typeof route.query.type === 'string' ? route.query.type : ''
+    const curKw = typeof route.query.keyword === 'string' ? route.query.keyword : ''
+    const effCurType = curType || DEFAULT_TYPE
+
+    const typeChanged = activeType.value !== effCurType
+    const kwChanged = keyword.value !== curKw
+    if (!typeChanged && !kwChanged) return
+
+    const q: Record<string, string> = { ...(route.query as Record<string, string>) }
+    if (typeChanged) q.type = activeType.value
+    // 清空时把 key 整个删掉，而不是留一个 `keyword=` —— 后者在地址栏上看着"还在筛选"
+    if (kwChanged) {
+      if (keyword.value) q.keyword = keyword.value
+      else delete q.keyword
+    }
+
+    void router.replace({ query: q })
+  }
+)
+
+/**
+ * URL → 关键词（反方向）。
+ *
+ * 覆盖两类本页改不到 URL 的场景：浏览器前进/后退、以及从别处（如首页搜索框）
+ * 再次带 keyword 进来。★ 先比一遍值再赋值：不然会被上面那个 watch 写回 URL 时
+ * 形成的环卷进去（vue-router 的 replace 即使 query 内容相同也会换一个新 route 对象，
+ * 所以"引用变了"不能当作"值变了"）。
+ */
+watch(
+  () => route.query.keyword,
+  (q) => {
+    const next = typeof q === 'string' ? q : ''
+    if (next !== keyword.value) keyword.value = next
+  }
+)
 
 // 列表重绘后要重新扫描一遍新的 .reveal 元素
 useReveal(

@@ -88,13 +88,22 @@ public class DiversionServiceImpl implements DiversionService {
         DiversionNotice reuse = null;
         if (!existing.isEmpty()) {
             DiversionNotice old = existing.get(0);
-            if (!DiversionNotice.STATUS_EXPIRED.equals(old.getStatus())) {
+            // ★ 判定必须**同时**看 status 和真实的 expire_at，只看 status 会留下死路。
+            //
+            // 草稿在创建时就写了 expire_at（见下面的 setExpireAt），但 expireOverdue()
+            // 是**定时**跑的 —— 在它跑之前，一条早已超时的草稿 status 仍然是 DRAFT。此时：
+            //   · 发布     → isOverdue 为真 → 8015
+            //   · 重新生成 → status != EXPIRED → 8011
+            // 两条路都堵死，运营只能去数据库删行，而那不是运营能做的动作。
+            // 补上 isOverdue(old) 之后，恢复路径不再依赖"清理任务跑过没有"。
+            if (!DiversionNotice.STATUS_EXPIRED.equals(old.getStatus()) && !isOverdue(old)) {
                 // 与工单同一条口径：一条事件只发一条公告。静默返回已有那条会让运营
                 // 以为"又发了一条"，而首页上仍然只有一条 —— 看着像发布没生效
                 throw new BizException(ErrorCode.NOTICE_EXISTS);
             }
-            // ★ 已过期的那条**允许重新生成**，沿用同一行（uk_event 只允许一行），
-            // 换新编码、重算候选。
+            // ★ 已过期的那条**允许重新生成**（"已过期"= status 已是 EXPIRED，或
+            // expire_at 已过 —— 上面那个判断的两个分支），沿用同一行
+            // （uk_event 只允许一行），换新编码、重算候选。
             //
             // 没有这一步会形成死路：过期后既不能重新发布（8015，候选快照是过期那天
             // 算的），又不能重新生成（8011，重复）—— 运营只能去数据库删行，
@@ -172,7 +181,13 @@ public class DiversionServiceImpl implements DiversionService {
                 if (isOverdue(n)) {
                     // 过期公告不能直接重新发布：它的候选快照是**过期那天**算的，
                     // 直接发出去等于拿旧方案指导今天的行程。
-                    // 出路是"重新生成"—— createDraft 会顶替掉已过期的那条
+                    //
+                    // 出路是"重新生成"：createDraft 会顶替掉这一条，而它认的是
+                    // "status == EXPIRED **或** isOverdue(old)"，所以**不依赖**
+                    // expireOverdue 这个定时任务有没有跑过。
+                    // 这一点是必须的 —— 早先 createDraft 只认 status，而超时的 DRAFT
+                    // 又不会被清理任务收走，于是"出路"对超时草稿并不存在：公告一旦
+                    // 放超时就成死路（发布 8015 / 重新生成 8011）。
                     throw new BizException(ErrorCode.NOTICE_EXPIRED);
                 }
                 if (!StringUtils.hasText(n.getTitle())) {
@@ -237,8 +252,16 @@ public class DiversionServiceImpl implements DiversionService {
     public int expireOverdue() {
         DiversionNotice patch = new DiversionNotice();
         patch.setStatus(DiversionNotice.STATUS_EXPIRED);
+        // ★ 条件是"**还没被标成过期** 且 expire_at 已过"，而不是"状态是 PUBLISHED"。
+        //
+        // 只看 PUBLISHED 会漏掉超时的 DRAFT：草稿创建时同样写了 expire_at，
+        // 却永远等不到这次清理 —— 于是运营列表上一条早该失效的草稿一直挂着"草稿"，
+        // 而它其实已经发不出去了（publish 会以 8015 拒掉）。
+        //
+        // `.ne(EXPIRED)` 保证已经 EXPIRED 的行不被重复处理：重复 UPDATE 虽然幂等，
+        // 但会把 n 说大、让日志里的"清理了 N 条"与实际不符。
         int n = noticeMapper.update(patch, new LambdaUpdateWrapper<DiversionNotice>()
-                .eq(DiversionNotice::getStatus, DiversionNotice.STATUS_PUBLISHED)
+                .ne(DiversionNotice::getStatus, DiversionNotice.STATUS_EXPIRED)
                 .le(DiversionNotice::getExpireAt, LocalDateTime.now()));
         if (n > 0) {
             log.info("[M5] 分流公告过期清理 {} 条", n);
