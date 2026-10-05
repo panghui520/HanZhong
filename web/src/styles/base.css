@@ -506,7 +506,9 @@ select {
 /* ---------- 响应式：只保留三档，够用且不散 ---------- */
 @media (max-width: 1440px) {
   :root {
-    --hero-h: min(84vh, 780px);
+    /* Hero 已改成 clamp 横幅级，这里只需把上限压一点。
+       不再写 min(84vh, …)—— 那是"满屏 Hero"时代的规则。 */
+    --hero-h: clamp(380px, 44vh, 480px);
   }
 }
 
@@ -515,7 +517,7 @@ select {
     --fs-display: 38px;
     --fs-h1: 28px;
     --fs-h2: 21px;
-    --hero-h: min(78vh, 640px);
+    --hero-h: clamp(340px, 42vh, 420px);
   }
   .grid-4 {
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -534,7 +536,7 @@ select {
        这个变量同时被 Assistant / Checkout / PoiDetail 的 sticky 偏移复用
        （top: calc(var(--nav-h) + …)），所以必须一起改，否则那些悬浮块会钻到导航下面。 */
     --nav-h: 92px;
-    --hero-h: 520px;
+    --hero-h: 380px;
     --fs-mega: 34px;
   }
   .container {

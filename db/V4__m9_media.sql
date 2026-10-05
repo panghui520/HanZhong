@@ -112,28 +112,28 @@ CREATE TABLE IF NOT EXISTS site_banner (
 -- 不该又冒出一条原标题的帧来。
 INSERT INTO site_banner
   (sort_order, scene, eyebrow, title, subtitle, description, link_url, cta, enabled)
-SELECT 1, 'qinling', '智慧文旅 · 乡村振兴', '汉游智脑', '发现汉中，也发现乡村的新可能',
-       '当景区高位运行，让客流顺着山谷流向乡村。AI 参与的规划、分流与运营，把一次到访延展成一条持续消费链。',
-       '/explore', '探索汉中', 1
+SELECT 1, 'qinling', '一城 · 一水 · 一山 · 一步 · 一景 · 一故事', '汉中 · 在这里\n遇见最美的诗与远方',
+       '智慧文旅 · 乡村振兴 · AI 让旅行更简单。秦岭的云海、汉江的古镇、村里的茶园与作坊，都在一条走得下来的动线上。',
+       '/explore', '开始探索', 1
 FROM DUAL WHERE NOT EXISTS (SELECT 1 FROM site_banner WHERE scene = 'qinling');
 
 INSERT INTO site_banner
   (sort_order, scene, eyebrow, title, subtitle, description, link_url, cta, enabled)
-SELECT 2, 'hanjiang', '汉江之畔 · 一城文脉', '一江汉水，两岸春秋', '从石门栈道到汉家发祥地',
-       '汉中是汉文化的发祥地。我们把散落的景区、街巷、村镇连成可规划的动线，让每一次停留都落在有故事的地方。',
-       '/assistant', '问问智脑', 1
+SELECT 2, 'hanjiang', '汉江之畔 · 一城文脉', '一江汉水\n两岸春秋', '从石门栈道到汉家发祥地',
+       '汉中是汉文化的发祥地。石门栈道、古汉台、拜将坛都在一条不长的动线上，一天就能走完半部汉史。',
+       '/explore?type=SCENIC', '开始探索', 1
 FROM DUAL WHERE NOT EXISTS (SELECT 1 FROM site_banner WHERE scene = 'hanjiang');
 
 INSERT INTO site_banner
   (sort_order, scene, eyebrow, title, subtitle, description, link_url, cta, enabled)
-SELECT 3, 'rapeseed', '油菜花海 · 乡村体验', '把春天种在田里', '花期之外，乡村仍然值得来',
-       '油菜花、茶园、梯田不只是风景，也是可预约的乡村体验。游客走进来，收益留在村里。',
-       '/explore', '乡村体验', 1
+SELECT 3, 'rapeseed', '油菜花海 · 乡村体验', '把春天\n种在田里', '花期之外，乡村仍然值得来',
+       '油菜花、茶园、橘园、腊味作坊，都能走进去待上半天。跟着农户采一次茶、熏一挂肉，比拍照记得更久。',
+       '/explore?type=RURAL_SPOT', '开始探索', 1
 FROM DUAL WHERE NOT EXISTS (SELECT 1 FROM site_banner WHERE scene = 'rapeseed');
 
 INSERT INTO site_banner
   (sort_order, scene, eyebrow, title, subtitle, description, link_url, cta, enabled)
-SELECT 4, 'hantai', '古汉台 · 东方人文', '檐下百年，一眼千载', '在古建与花树之间读懂汉中',
-       '以东方人文为底色的视觉与内容体系，让文化资源可阅读、可推荐、可被 AI 准确引用。',
-       '/assistant', '了解文脉', 1
+SELECT 4, 'hantai', '古汉台 · 东方人文', '檐下百年\n一眼千载', '在古建与花树之间读懂汉中',
+       '汉中市博物馆里藏着石门十三品，也藏着这座城两千年的来路。慢慢看，比匆匆打卡值得。',
+       '/explore?type=SCENIC', '开始探索', 1
 FROM DUAL WHERE NOT EXISTS (SELECT 1 FROM site_banner WHERE scene = 'hantai');
